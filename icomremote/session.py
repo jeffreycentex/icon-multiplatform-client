@@ -17,12 +17,13 @@ import asyncio
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 import numpy as np
 
 from . import civ
+from .state import freq_limits
 from .rsba1.stream import StreamError
 from .rsba1.streams import AudioStream, AuthError, ControlStream, SerialStream
 from .sinks import SoundCardSink, make_file_sink
@@ -58,6 +59,10 @@ class _Disconnected(Exception):
     pass
 
 
+class NotConnected(RuntimeError):
+    pass
+
+
 class RadioSession:
     def __init__(self, on_event=None):
         self._on_event = on_event or (lambda kind, payload: None)
@@ -73,7 +78,9 @@ class RadioSession:
         self.info = None
         self.civ_address = None
         self.rig = civ.RigState()
+        self._rig_lock = threading.Lock()
         self.meters = {}
+        self.freq_limits = freq_limits(None)
         self._sink_lock = threading.Lock()
         self._sinks = {}
         self._connected_at = None
@@ -187,6 +194,7 @@ class RadioSession:
             self._control = control
             info = await self._until_failed(control.start(), failed)
             self.info = info
+            self.freq_limits = freq_limits(info.radio_name)
             addr = self._choose_civ_address(info)
             self._decoder = civ.CivDecoder(addr)
 
@@ -208,7 +216,8 @@ class RadioSession:
             self._set_connected(True)
             self._status("Connected to %s (%s, CI-V %02Xh)" % (spec.label(), info.radio_name, addr))
 
-            for f in (civ.read_freq(addr), civ.read_mode(addr), civ.read_data_mode(addr)):
+            for f in (civ.read_freq(addr), civ.read_mode(addr), civ.read_data_mode(addr),
+                      civ.read_if_width(addr)):
                 serial.send_civ(f)
             tasks.append(loop.create_task(self._poll_loop(addr)))
             tasks.append(loop.create_task(self._stats_loop()))
@@ -284,6 +293,8 @@ class RadioSession:
                     s.send_civ(civ.read_freq(addr))
                     s.send_civ(civ.read_mode(addr))
                     s.send_civ(civ.read_data_mode(addr))
+                    if self.rig.mode != "FM":
+                        s.send_civ(civ.read_if_width(addr))
                 rtt = self._control.rtt if self._control else 0.0
                 for st in (self._serial, self._audio):
                     if st is not None:
@@ -329,9 +340,11 @@ class RadioSession:
             return
         for kind, value in dec.feed(data):
             if kind in ("freq", "mode"):
-                if dec.state != self.rig:
+                with self._rig_lock:
+                    changed = dec.state != self.rig
                     self.rig = dec.state
-                    self._emit("rig", self.rig)
+                if changed:
+                    self._emit("rig", dec.state)
             elif kind in ("smeter", "po", "swr", "rfpower"):
                 self.meters[kind] = value
                 self._emit("meter", (kind, value))
@@ -351,6 +364,56 @@ class RadioSession:
                 self._serial.send_civ(frame)
         loop.call_soon_threadsafe(_send)
         return True
+
+    # ------------------------------------------------------------------ control API
+    # Thread-safe. Each setter updates self.rig at once (so a rigctl 'f' right
+    # after 'F' sees the new value), queues the CI-V command and a read-back;
+    # the radio's answer then confirms or corrects the state.
+
+    def _apply(self, new_state, frames):
+        if not self._connected:
+            raise NotConnected("not connected to the radio")
+        with self._rig_lock:
+            self.rig = new_state
+        self._emit("rig", new_state)
+
+        def _send():
+            if self._decoder is not None:
+                self._decoder.state = new_state
+            if self._serial is not None:
+                for f in frames:
+                    self._serial.send_civ(f)
+        self._loop.call_soon_threadsafe(_send)
+        return new_state
+
+    def set_frequency(self, hz):
+        hz = int(round(float(hz)))
+        lo, hi = self.freq_limits
+        if not lo <= hz <= hi:
+            raise ValueError("%.3f kHz is outside %.0f-%.0f kHz" % (hz / 1e3, lo / 1e3, hi / 1e3))
+        a = self.civ_address
+        st = replace(self.rig, freq_hz=hz)
+        return self._apply(st, [civ.set_freq(a, hz), civ.read_freq(a)])
+
+    def set_mode(self, civ_mode, data, filt=None):
+        """civ_mode: LSB/USB/AM/FM; data: DATA mode on/off; filt: 1-3 or None = keep."""
+        if civ_mode not in civ.MODE_CODES:
+            raise ValueError("unsupported mode %r" % civ_mode)
+        filt = filt or self.rig.filter or 1
+        if filt not in (1, 2, 3):
+            raise ValueError("filter must be 1-3")
+        a = self.civ_address
+        st = replace(self.rig, mode=civ_mode, data=bool(data), filter=filt, if_width_index=-1)
+        frames = [civ.set_mode(a, civ_mode, filt), civ.set_data_mode(a, data, filt),
+                  civ.read_mode(a), civ.read_data_mode(a)]
+        if civ_mode != "FM":
+            frames.append(civ.read_if_width(a))
+        return self._apply(st, frames)
+
+    def set_filter(self, filt):
+        if not self.rig.mode:
+            raise NotConnected("mode not known yet")
+        return self.set_mode(self.rig.mode, self.rig.data, filt)
 
     # ------------------------------------------------------------------ audio
     def _on_audio(self, pcm):

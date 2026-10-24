@@ -126,6 +126,22 @@ def swr(raw):
     return _interp(raw, SWR_POINTS)
 
 
+# ---------------------------------------------------------------- filters
+# IF filter width (command 1A 03), IC-7300 family: one BCD byte, an index.
+#   SSB/CW/RTTY: 00-09 -> 50..500 Hz in 50 Hz steps, 10-40 -> 600..3600 Hz in 100 Hz steps
+#   AM:          00-49 -> 200..10000 Hz in 200 Hz steps
+#   FM:          fixed per filter (no 1A 03)
+FM_WIDTHS = {1: 15000, 2: 10000, 3: 7000}
+
+
+def if_width_hz(mode, index):
+    if mode == "AM":
+        return 200 * (index + 1)
+    if index <= 9:
+        return 50 * (index + 1)
+    return 600 + 100 * (index - 10)
+
+
 # ---------------------------------------------------------------- radio state
 
 @dataclass(frozen=True)
@@ -134,12 +150,22 @@ class RigState:
     mode: str = ""          # LSB/USB/AM/FM/... as the radio reports it
     data: bool = False      # DATA mode (USB-D etc.)
     filter: int = 0         # 1..3
+    if_width_index: int = -1   # raw 1A 03 value; -1 = unknown
 
     @property
     def mode_label(self):
         if not self.mode:
             return "?"
         return self.mode + ("-D" if self.data else "")
+
+    @property
+    def width_hz(self):
+        """Passband of the selected filter, or 0 if unknown."""
+        if self.mode == "FM":
+            return FM_WIDTHS.get(self.filter, 0)
+        if self.if_width_index < 0:
+            return 0
+        return if_width_hz(self.mode, self.if_width_index)
 
 
 class CivDecoder:
@@ -182,7 +208,11 @@ class CivDecoder:
         if cmd in (0x01, 0x04) and len(payload) >= 1:
             mode = MODE_NAMES.get(payload[0], "0x%02X" % payload[0])
             filt = payload[1] if len(payload) > 1 else st.filter
-            self.state = replace(st, mode=mode, filter=filt)
+            width = st.if_width_index if (mode, filt) == (st.mode, st.filter) else -1
+            self.state = replace(st, mode=mode, filter=filt, if_width_index=width)
+            return [("mode", self.state)]
+        if cmd == 0x1A and payload[:1] == b"\x03" and len(payload) >= 2:
+            self.state = replace(st, if_width_index=bcd_value(payload[1]))
             return [("mode", self.state)]
         if cmd == 0x1A and payload[:1] == b"\x06" and len(payload) >= 2:
             data = payload[1] != 0
@@ -216,3 +246,21 @@ def read_data_mode(addr):
 
 def read_smeter(addr):
     return frame(addr, 0x15, 0x02)
+
+
+def read_if_width(addr):
+    return frame(addr, 0x1A, 0x03)
+
+
+def set_freq(addr, hz):
+    return frame(addr, 0x05, None, encode_freq(hz))
+
+
+def set_mode(addr, mode, filt):
+    """mode: LSB/USB/AM/FM/...; filt: 1..3. Leaves DATA mode as it was."""
+    return frame(addr, 0x06, None, bytes([MODE_CODES[mode], filt]))
+
+
+def set_data_mode(addr, on, filt):
+    """DATA mode on (D1) with filter filt, or off."""
+    return frame(addr, 0x1A, 0x06, bytes([1, filt]) if on else b"\x00\x00")

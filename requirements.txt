@@ -1,4 +1,5 @@
 # Required
+PySide6>=6.6
 numpy>=1.24
 sounddevice>=0.4.6        # PortAudio wheels included on Windows/macOS; Linux needs libportaudio2
 

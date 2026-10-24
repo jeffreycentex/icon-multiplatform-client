@@ -271,6 +271,16 @@ class FakeRadio:
                 return echo + [mk(0x1A, 0x06, bytes([1 if self.data else 0, self.filt if self.data else 0]))]
             self.data = payload[1] != 0
             return echo + [mk(civ.OK)]
+        if cmd == 0x06 and len(payload) >= 1:
+            self.mode = payload[0]
+            if len(payload) > 1:
+                self.filt = payload[1]
+            return echo + [mk(civ.OK)]
+        if cmd == 0x1A and payload[:1] == b"\x03" and len(payload) == 1:
+            if self.mode == 0x05:                   # FM: no IF width
+                return echo + [mk(civ.NG)]
+            idx = {1: 34, 2: 28, 3: 22}[self.filt] if self.mode != 0x02 else {1: 44, 2: 29, 3: 14}[self.filt]
+            return echo + [mk(0x1A, 0x03, bytes([civ.bcd_byte(idx)]))]
         if cmd == 0x15 and payload[:1] == b"\x02":
             return echo + [mk(0x15, 0x02, civ.encode_level(120))]
         if cmd == 0x05:
