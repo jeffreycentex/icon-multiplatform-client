@@ -211,6 +211,8 @@ class CivDecoder:
             width = st.if_width_index if (mode, filt) == (st.mode, st.filter) else -1
             self.state = replace(st, mode=mode, filter=filt, if_width_index=width)
             return [("mode", self.state)]
+        if cmd == 0x1A and payload[:1] == b"\x05" and len(payload) >= 4:
+            return [("menu", (bytes(payload[1:3]), bytes(payload[3:])))]
         if cmd == 0x1A and payload[:1] == b"\x03" and len(payload) >= 2:
             self.state = replace(st, if_width_index=bcd_value(payload[1]))
             return [("mode", self.state)]
@@ -264,3 +266,34 @@ def set_mode(addr, mode, filt):
 def set_data_mode(addr, on, filt):
     """DATA mode on (D1) with filter filt, or off."""
     return frame(addr, 0x1A, 0x06, bytes([1, filt]) if on else b"\x00\x00")
+
+
+# ---------------------------------------------------------------- TX and menu items
+
+def set_ptt(addr, on):
+    return frame(addr, 0x1C, 0x00, b"\x01" if on else b"\x00")
+
+
+def read_ptt(addr):
+    return frame(addr, 0x1C, 0x00)
+
+
+def read_menu(addr, item):
+    """item: 2 bytes, e.g. b'\x00\x85' for 1A 05 00 85."""
+    return frame(addr, 0x1A, 0x05, item)
+
+
+def set_menu(addr, item, value):
+    return frame(addr, 0x1A, 0x05, item + bytes(value))
+
+
+# DATA MOD menu item per model (1A 05 xx xx), from each radio's CI-V reference.
+# Values: 00 MIC, 01 USB, 02 ACC, 03 MIC+USB, 04 MIC+ACC, 05 LAN.
+DATA_MOD_ITEM = {
+    "IC-7300MK2": b"\x00\x85",
+}
+LAN_MOD_LEVEL_ITEM = {
+    "IC-7300MK2": b"\x00\x83",       # 0000-0255 = 0-100 %
+}
+DATA_MOD_LAN = 0x05
+DATA_MOD_NAMES = {0x00: "MIC", 0x01: "USB", 0x02: "ACC", 0x03: "MIC+USB", 0x04: "MIC+ACC", 0x05: "LAN"}

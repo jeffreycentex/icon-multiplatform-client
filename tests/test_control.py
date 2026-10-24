@@ -128,10 +128,11 @@ class TestRigctld(_Base):
         time.sleep(0.2)
         self.assertFalse(self.radio.data)
 
-    def test_ptt_refused_until_step3(self):
-        self.assertEqual(self.cmd("T 1"), ["RPRT -11"])
+    def test_ptt_refused_outside_data_mode(self):
+        self.assertEqual(self.cmd("T 1"), ["RPRT -9"])    # radio is in plain USB
         self.assertEqual(self.cmd("T 0"), ["RPRT 0"])
         self.assertEqual(self.cmd("t"), ["0"])
+        self.assertFalse(self.radio.ptt)
 
     def test_strength_and_dump_state(self):
         self.assertTrue(wait_for(lambda: "smeter" in self.session.meters))

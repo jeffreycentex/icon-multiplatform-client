@@ -14,6 +14,7 @@ import asyncio
 import os
 import struct
 import threading
+import time
 
 import numpy as np
 
@@ -97,7 +98,7 @@ class _Port(asyncio.DatagramProtocol):
 class FakeRadio:
     def __init__(self, user="beer", password="beerbeer", name="IC-7300MK2", civ_address=0xB6,
                  freq_hz=14_074_000, mode=0x01, data=True, filt=1, drop_audio=(), send_audio=True,
-                 in_use_by=None):
+                 in_use_by=None, data_mod=0x01, lan_mod_level=128, menu_ng=False):
         self.user, self.password = user, password
         self.name = name
         self.civ_address = civ_address
@@ -105,10 +106,18 @@ class FakeRadio:
         self.drop_audio = set(drop_audio)
         self.send_audio = send_audio
         self.in_use_by = in_use_by          # (computer, ip) of another client holding the radio
+        self.menu = {b"\x00\x85": data_mod, b"\x00\x83": lan_mod_level}
+        self.menu_ng = menu_ng               # radio that doesn't know these menu items
+        self.menu_writes = []
+        self.ptt = False
+        self.ptt_log = []                    # (time, on)
+        self.tx_audio_while_ptt = 0
+        self.tx_audio_while_rx = 0
         self.events = []
         self.civ_received = []
         self.tx_audio = bytearray()
         self.logins = 0
+        self._caps_sent = False
         self._serial_inner = 0
         self._phase = 0.0
         self._loop = None
@@ -172,6 +181,10 @@ class FakeRadio:
         elif port is self.audio:
             if P.is_audio_data(d):
                 self.tx_audio += d[P.AUDIO_HEADER_LEN:]
+                if self.ptt:
+                    self.tx_audio_while_ptt += 1
+                else:
+                    self.tx_audio_while_rx += 1
 
     # ------------------------------------------------------------------ control
     def _control(self, d):
@@ -179,6 +192,7 @@ class FakeRadio:
         n = len(d)
         if n == P.LEN_LOGIN:
             self.logins += 1
+            self._caps_sent = False
             ok = d[64:80] == encode(self.user) and d[80:96] == encode(self.password)
             r = bytearray(P.LEN_LOGIN_REPLY)
             r[0:16] = c.hdr(P.LEN_LOGIN_REPLY)
@@ -195,7 +209,8 @@ class FakeRadio:
             r[0:16] = c.hdr(P.LEN_AUTH)
             r[16:32] = bytes([0, 0, 0, 0x30, 0x02, magic, 0, d[23], d[24], 0]) + bytes(d[26:32])
             # Order seen from a real IC-7300MK2: capabilities, status, then the auth reply.
-            if magic == 0x05 and ("control", "caps") not in self.events:
+            if magic == 0x05 and not self._caps_sent:           # once per login, like the real radio
+                self._caps_sent = True
                 self._send_caps()
             c.send(bytes(r))
             self.events.append(("control", "auth_%02x" % magic))
@@ -281,6 +296,24 @@ class FakeRadio:
                 return echo + [mk(civ.NG)]
             idx = {1: 34, 2: 28, 3: 22}[self.filt] if self.mode != 0x02 else {1: 44, 2: 29, 3: 14}[self.filt]
             return echo + [mk(0x1A, 0x03, bytes([civ.bcd_byte(idx)]))]
+        if cmd == 0x1C and payload[:1] == b"\x00":
+            if len(payload) == 1:
+                return echo + [mk(0x1C, 0x00, b"\x01" if self.ptt else b"\x00")]
+            self.ptt = payload[1] == 1
+            self.ptt_log.append((time.monotonic(), self.ptt))
+            return echo + [mk(civ.OK)]
+        if cmd == 0x1A and payload[:1] == b"\x05" and len(payload) >= 3:
+            item = bytes(payload[1:3])
+            if self.menu_ng or item not in self.menu:
+                return echo + [mk(civ.NG)]
+            if len(payload) == 3:
+                v = self.menu[item]
+                data = bytes([civ.bcd_byte(v)]) if item == b"\x00\x85" else civ.encode_level(v)
+                return echo + [mk(0x1A, 0x05, item + data)]
+            v = civ.bcd_value(payload[3]) if len(payload) == 4 else civ.decode_level(payload[3:5])
+            self.menu[item] = v
+            self.menu_writes.append((item, v))
+            return echo + [mk(civ.OK)]
         if cmd == 0x15 and payload[:1] == b"\x02":
             return echo + [mk(0x15, 0x02, civ.encode_level(120))]
         if cmd == 0x05:

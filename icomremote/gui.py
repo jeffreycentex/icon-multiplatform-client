@@ -13,10 +13,11 @@ from PySide6.QtWidgets import (
 
 from . import __version__, civ
 from .rigctld import RigctldServer
-from .session import ConnectionSpec, NotConnected, RadioSession
+from .session import ConnectionSpec, NotConnected, PttRefused, RadioSession
 from .sinks import (HAVE_SOUNDDEVICE, PULSE_PREFIX, create_null_sink, guess_virtual_cable,
                     list_output_devices, sounddevice_error)
 from .state import BASE_MODES, FILTERS, PROFILES
+from .txaudio import guess_tx_cable, list_input_devices
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_radio_box())
         root.addWidget(self._build_tune_box())
         root.addWidget(self._build_audio_box())
+        root.addWidget(self._build_tx_box())
         root.addWidget(self._build_rigctl_box())
         root.addStretch(1)
         bottom = QHBoxLayout()
@@ -200,6 +202,72 @@ class MainWindow(QMainWindow):
         g.setColumnStretch(1, 1)
         return box
 
+    def _build_tx_box(self):
+        box = QGroupBox("Transmit (data modes only)")
+        g = QGridLayout(box)
+        self.tx_enable = QCheckBox("Audio from")
+        self.tx_enable.setToolTip("The transmit audio input: the output side of the virtual cable\n"
+                                  "WSJT-X/fldigi play into (BlackHole 2ch, CABLE Output, a monitor source)")
+        self.tx_enable.toggled.connect(self._tx_toggled)
+        self.tx_combo = QComboBox()
+        self.tx_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.tx_combo.currentIndexChanged.connect(self._tx_device_changed)
+        tx_refresh = QPushButton("Refresh")
+        tx_refresh.clicked.connect(self._refresh_tx_devices)
+        self.tx_gain = QSlider(Qt.Horizontal, minimum=0, maximum=200, value=100)
+        self.tx_gain.setToolTip("Transmit audio gain (100% = unity). Set ALC on the radio as usual.")
+        self.tx_gain.valueChanged.connect(self._tx_gain_changed)
+        self.tx_gain_label = QLabel("100%")
+        self.tx_level = QProgressBar(minimum=0, maximum=100, textVisible=True)
+        self.tx_level.setFormat("input level")
+        self.ptt_btn = QPushButton("PTT", checkable=True)
+        self.ptt_btn.setMinimumWidth(90)
+        self.ptt_btn.clicked.connect(self._ptt_clicked)
+        self.tx_indicator = QLabel("RX")
+        self.tx_indicator.setAlignment(Qt.AlignCenter)
+        self.tx_indicator.setMinimumWidth(44)
+        self._style_tx(False)
+        self.ptt_timeout = QSpinBox(minimum=10, maximum=600, value=180, suffix=" s")
+        self.ptt_timeout.setToolTip("Transmit is cut off after this long, whatever keyed it")
+        self.ptt_timeout.valueChanged.connect(lambda v: setattr(self.radio, "ptt_timeout", float(v)))
+        self.manage_data_mod = QCheckBox("Switch DATA MOD to LAN while connected (put back on disconnect)")
+        self.manage_data_mod.toggled.connect(lambda on: setattr(self.radio, "manage_data_mod", on))
+        self.data_mod_label = QLabel("")
+        self.data_mod_label.setWordWrap(True)
+        self.restore_btn = QPushButton("Restore DATA MOD now")
+        self.restore_btn.setToolTip("Put DATA MOD back to its original setting now.\n"
+                                    "Transmit is then refused until you reconnect.")
+        self.restore_btn.clicked.connect(self._restore_clicked)
+        self.restore_btn.setEnabled(False)
+
+        g.addWidget(self.tx_enable, 0, 0)
+        g.addWidget(self.tx_combo, 0, 1, 1, 3)
+        g.addWidget(tx_refresh, 0, 4)
+        g.addWidget(QLabel("Gain"), 1, 0)
+        g.addWidget(self.tx_gain, 1, 1, 1, 2)
+        g.addWidget(self.tx_gain_label, 1, 3)
+        g.addWidget(QLabel("Level"), 2, 0)
+        g.addWidget(self.tx_level, 2, 1, 1, 3)
+        row = QHBoxLayout()
+        row.addWidget(self.ptt_btn)
+        row.addWidget(self.tx_indicator)
+        row.addSpacing(16)
+        row.addWidget(QLabel("PTT timeout"))
+        row.addWidget(self.ptt_timeout)
+        row.addStretch(1)
+        g.addLayout(row, 3, 0, 1, 5)
+        if sys.platform.startswith("linux") and shutil.which("pactl"):
+            mk = QPushButton("Create 'IcomTX' virtual sink")
+            mk.setToolTip("pactl load-module module-null-sink sink_name=IcomTX\n"
+                          "WSJT-X/fldigi play to 'IcomTX'; transmit audio comes from 'Monitor of IcomTX'.")
+            mk.clicked.connect(self._create_tx_sink)
+            g.addWidget(mk, 2, 4)
+        g.addWidget(self.manage_data_mod, 4, 0, 1, 5)
+        g.addWidget(self.data_mod_label, 5, 0, 1, 4)
+        g.addWidget(self.restore_btn, 5, 4)
+        g.setColumnStretch(1, 1)
+        return box
+
     def _build_rigctl_box(self):
         box = QGroupBox("Hamlib rigctld (CAT control for WSJT-X, fldigi, JS8Call …)")
         g = QGridLayout(box)
@@ -244,6 +312,15 @@ class MainWindow(QMainWindow):
         self._step_changed()
         self._refresh_devices(select=s.value("audio_device", ""))
         self.volume.setValue(s.value("volume", 100, type=int))
+        self._refresh_tx_devices(select=s.value("tx_device", ""))
+        self.tx_gain.setValue(s.value("tx_gain", 100, type=int))
+        self.ptt_timeout.setValue(s.value("ptt_timeout", 180, type=int))
+        self.radio.ptt_timeout = float(self.ptt_timeout.value())
+        self.manage_data_mod.setChecked(s.value("manage_data_mod", True, type=bool))
+        self.radio.manage_data_mod = self.manage_data_mod.isChecked()
+        if s.value("tx_enable", False, type=bool) and self.tx_combo.currentData():
+            self.tx_enable.setChecked(True)
+        self._show_pending_restores()
         self.rig_addr.setCurrentText(s.value("rig_addr", "127.0.0.1"))
         self.rig_port.setValue(s.value("rig_port", 4532, type=int))
         self.rig_plain_data.setChecked(s.value("rig_plain_data", True, type=bool))
@@ -270,6 +347,11 @@ class MainWindow(QMainWindow):
         s.setValue("audio_device", self.device_combo.currentData() or "")
         s.setValue("audio_enable", self.audio_enable.isChecked())
         s.setValue("volume", self.volume.value())
+        s.setValue("tx_device", self.tx_combo.currentData() or "")
+        s.setValue("tx_enable", self.tx_enable.isChecked())
+        s.setValue("tx_gain", self.tx_gain.value())
+        s.setValue("ptt_timeout", self.ptt_timeout.value())
+        s.setValue("manage_data_mod", self.manage_data_mod.isChecked())
         s.setValue("rig_enable", self.rig_enable.isChecked())
         s.setValue("rig_addr", self.rig_addr.currentText())
         s.setValue("rig_port", self.rig_port.value())
@@ -292,8 +374,10 @@ class MainWindow(QMainWindow):
         self.connect_btn.setText("Disconnect")
 
     def _set_controls_enabled(self, on):
-        for w in (self.freq, self.data_btn, *self.mode_buttons.values(), *self.filter_buttons.values()):
+        for w in (self.freq, self.data_btn, self.ptt_btn,
+                  *self.mode_buttons.values(), *self.filter_buttons.values()):
             w.setEnabled(on)
+        self.manage_data_mod.setEnabled(not on)     # takes effect at connect time
 
     # ================================================================== tuning
     def _show_rig(self, st):
@@ -395,6 +479,96 @@ class MainWindow(QMainWindow):
         if sink is not None:
             sink.gain = self.volume.value() / 100.0
 
+    # ================================================================== transmit
+    def _refresh_tx_devices(self, select=None):
+        current = select if isinstance(select, str) and select else self.tx_combo.currentData()
+        self.tx_combo.blockSignals(True)
+        self.tx_combo.clear()
+        devices = list_input_devices()
+        for key, label in devices:
+            self.tx_combo.addItem(label, key)
+        if not devices:
+            self.tx_combo.addItem("(no input devices found)", None)
+        idx = self.tx_combo.findData(current) if current else -1
+        if idx < 0:
+            guess = guess_tx_cable(devices)
+            idx = self.tx_combo.findData(guess) if guess else 0
+        self.tx_combo.setCurrentIndex(max(idx, 0))
+        self.tx_combo.blockSignals(False)
+
+    def _create_tx_sink(self, *_):
+        try:
+            name = create_null_sink("IcomTX")
+        except Exception as e:
+            QMessageBox.warning(self, "Virtual sink", str(e))
+            return
+        from .txaudio import PULSE_SOURCE_PREFIX
+        self._refresh_tx_devices(select=PULSE_SOURCE_PREFIX + name + ".monitor")
+        self._tx_device_changed()
+
+    @Slot(bool)
+    def _tx_toggled(self, on):
+        key = self.tx_combo.currentData() if on else None
+        if on and not key:
+            self.tx_enable.setChecked(False)
+            return
+        if on and self.audio_enable.isChecked():
+            rx = (self.device_combo.currentData() or "").split("|")[0].lower()
+            tx = key.split("|")[0].lower()
+            if rx and (rx == tx or (rx.startswith("pulse-sink:") and tx == "pulse-source:%s.monitor" % rx[11:])):
+                QMessageBox.warning(self, "Transmit audio",
+                                    "Receive audio is played into the same device you selected for "
+                                    "transmit audio, so received audio would be transmitted.\n\n"
+                                    "Use a second virtual cable for transmit (see the README).")
+                self.tx_enable.setChecked(False)
+                return
+        self.radio.set_tx_device(key, self.tx_gain.value() / 100.0)
+
+    def _tx_device_changed(self, *_):
+        if self.tx_enable.isChecked():
+            self._tx_toggled(True)
+
+    def _tx_gain_changed(self, v):
+        self.tx_gain_label.setText("%d%%" % v)
+        self.radio.set_tx_gain(v / 100.0)
+
+    def _ptt_clicked(self, on):
+        try:
+            self.radio.set_ptt(on, owner=self)
+        except PttRefused as e:
+            self.ptt_btn.setChecked(False)
+            self.statusBar().showMessage(str(e), 8000)
+
+    def _style_tx(self, tx):
+        self.tx_indicator.setText("TX" if tx else "RX")
+        self.tx_indicator.setStyleSheet(
+            "background: #c0392b; color: white; font-weight: bold; border-radius: 3px" if tx
+            else "background: #2e7d32; color: white; font-weight: bold; border-radius: 3px")
+
+    def _restore_clicked(self, *_):
+        try:
+            self.radio.restore_data_mod_now()
+        except NotConnected as e:
+            self.statusBar().showMessage(str(e), 5000)
+
+    def _show_data_mod(self, info):
+        v, orig, name = info["value"], info["original"], info["name"]
+        if v is None:
+            self.data_mod_label.setText("DATA MOD: unknown (set it to LAN on the radio)")
+        elif orig is not None:
+            self.data_mod_label.setText("DATA MOD: %s (was %s; put back on disconnect)"
+                                        % (name, civ.DATA_MOD_NAMES.get(orig, orig)))
+        else:
+            self.data_mod_label.setText("DATA MOD: %s" % name)
+        self.restore_btn.setEnabled(orig is not None)
+
+    def _show_pending_restores(self):
+        pend = self.radio.pending_restores()
+        lines = ["%s: DATA MOD is still LAN; it will be put back to %s at the next connection"
+                 % (radio, civ.DATA_MOD_NAMES.get(v.get("data_mod"), v.get("data_mod")))
+                 for radio, v in pend.items() if "data_mod" in v]
+        self.data_mod_label.setText("\n".join(lines))
+
     # ================================================================== rigctld
     @Slot(bool)
     def _toggle_rigctld(self, on):
@@ -459,6 +633,10 @@ class MainWindow(QMainWindow):
             else:
                 self.smeter.setValue(0)
                 self.smeter.setFormat("—")
+                self.ptt_btn.setChecked(False)
+                self._style_tx(False)
+                self.restore_btn.setEnabled(False)
+                self._show_pending_restores()
                 if not self.radio.running:
                     self.connect_btn.setText("Connect")
         elif kind == "stats":
@@ -479,10 +657,24 @@ class MainWindow(QMainWindow):
             if self.rigctld is not None:
                 self.rig_status.setText("Listening on %s:%d — %d client%s"
                                         % (self.rigctld.host, self.rigctld.port, n, "" if n == 1 else "s"))
+        elif kind == "ptt":
+            self.ptt_btn.setChecked(payload)
+        elif kind == "tx":
+            self._style_tx(payload)
+        elif kind == "data_mod":
+            self._show_data_mod(payload)
+        elif kind == "tx_source_failed":
+            self.tx_enable.blockSignals(True)
+            self.tx_enable.setChecked(False)
+            self.tx_enable.blockSignals(False)
+        elif kind == "rig_refused":
+            self.statusBar().showMessage("rigctl: %s" % payload, 8000)
         elif kind == "rig_command":
             self.statusBar().showMessage("rigctl: %s" % payload, 3000)
 
     def _tick(self, *_):
+        lvl = self.radio.tx_level()
+        self.tx_level.setValue(int(100 * min(1.0, lvl)) if lvl is not None else 0)
         stats = self.radio.audio_stats()
         if stats:
             self.audio_stats.setText("buffer %.0f ms   clock trim %+.0f ppm   underruns %d"

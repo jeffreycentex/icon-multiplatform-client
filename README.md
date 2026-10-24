@@ -20,13 +20,12 @@ IC-7300MK2 ◄udp─┤ session thread (asyncio): control / serial / audio  │
 | Step | Content | State |
 |---|---|---|
 | 1 | Login, UDP streams, RX audio, CI-V read | done, verified on an IC-7300MK2 |
-| 2 | GUI, frequency/mode/filter control, S-meter, rigctld | **this release** |
-| 3 | TX audio, PTT with safety (data modes only, timeout, unkey on disconnect), DATA MOD switch and restore | next |
+| 2 | GUI, frequency/mode/filter control, S-meter, rigctld | done, verified on an IC-7300MK2 |
+| 3 | TX audio, PTT with safety rules, DATA MOD switch and restore | **this release** |
 | 4 | Po/SWR on TX, RF power, TUNE | |
 | 5 | Power ON/OFF | |
 | 6 | PyInstaller builds | |
 
-Receive only for now: PTT requests are refused until step 3.
 
 ## Install
 
@@ -80,16 +79,73 @@ Enter the radio's address, user name and password, and click **Connect**.
 The password is not saved unless you tick *Remember password*; it is then
 stored unencrypted in the app's settings on that computer.
 
-## Virtual audio cable setup
+## Virtual audio cables
 
-The app plays into the *input* side of the virtual cable; the decoding
-program records from the *output* side.
+You need **two** virtual cables, one per direction. If receive and transmit
+share one cable, received audio would be sent back to the radio (the app
+refuses that combination).
 
-| OS | Install | In Icom Remote, play to | In WSJT-X / fldigi, input from |
+| Direction | Windows | macOS | Linux |
 |---|---|---|---|
-| Windows | [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) | `CABLE Input (VB-Audio Virtual Cable)` | `CABLE Output (VB-Audio Virtual Cable)` |
-| macOS | [BlackHole](https://existential.audio/blackhole/) (`brew install blackhole-2ch`) | `BlackHole 2ch` | `BlackHole 2ch` |
-| Linux | none: click **Create 'IcomRX' virtual sink** | `PulseAudio/PipeWire sink: IcomRX` | `Monitor of IcomRX` |
+| Install | [VB-Audio Virtual Cable](https://vb-audio.com/Cable/) + a second cable (VB-Audio *Hi-Fi Cable* or *Cable A/B*) | [BlackHole](https://existential.audio/blackhole/): `brew install blackhole-2ch blackhole-16ch` | nothing: the app's buttons create PulseAudio/PipeWire sinks |
+| **Receive**: Icom Remote *Play to* | `CABLE Input` | `BlackHole 2ch` | `PulseAudio/PipeWire sink: IcomRX` |
+| Receive: WSJT-X / fldigi input | `CABLE Output` | `BlackHole 2ch` | `Monitor of IcomRX` |
+| **Transmit**: WSJT-X / fldigi output | second cable's input | `BlackHole 16ch` | `IcomTX` |
+| Transmit: Icom Remote *Audio from* | second cable's output | `BlackHole 16ch` | `PulseAudio/PipeWire source: IcomTX.monitor` |
+
+macOS: the first time the app reads an input device, macOS asks for
+microphone permission for the program running it (Terminal, or the app
+bundle). If it was denied, the transmit level stays at zero: enable it in
+System Settings → Privacy & Security → Microphone.
+
+## Transmit
+
+Transmit is for data modes only. PTT, from the **PTT** button or from rigctl
+(`T 1`), is refused unless:
+
+- the radio is in a DATA mode (USB-D, LSB-D, AM-D, FM-D),
+- a transmit audio input is selected (*Audio from*), and
+- DATA MOD is LAN.
+
+Transmit stops (PTT released) when:
+
+- the **PTT timeout** expires (default 180 s, whatever keyed it),
+- the radio leaves DATA mode, from the app or on the radio's front panel,
+- you disconnect or quit, or the connection fails,
+- the transmit audio input is changed or disappears,
+- the rigctl client that keyed PTT disconnects (e.g. WSJT-X crashes mid-transmission).
+
+Audio is only sent to the radio while PTT is on. The **TX/RX** indicator shows
+what the radio reports, not just what was requested.
+
+### DATA MOD
+
+With *Switch DATA MOD to LAN while connected* on (the default), the app reads
+the radio's DATA MOD setting when it connects, writes the original value to
+disk, then sets DATA MOD to LAN. When you disconnect or quit, it puts the
+original back and confirms it by reading it back.
+
+If the app can't put it back (the app is killed, the computer loses power,
+the network drops), the original value stays recorded in `restore.json` in
+the app's settings folder:
+
+- macOS: `~/Library/Application Support/IcomRemote/`
+- Windows: `%APPDATA%\IcomRemote\`
+- Linux: `~/.config/icomremote/`
+
+The next connection to that radio restores it on disconnect, and the window
+shows the pending restore while you're disconnected. **Restore DATA MOD now**
+puts it back immediately (transmit is then refused until you reconnect). At
+the radio without the app, change DATA MOD on the front panel (on the IC-7300
+and IC-705: Menu → Set →
+Connectors → MOD Input → DATA MOD).
+
+On connect the app also warns if *LAN MOD Level* is 0 %, which would make
+transmit silent.
+
+DATA MOD switching is implemented for the IC-7300MK2 (CI-V `1A 05 00 85`,
+from Icom's CI-V reference). For other models the app reports that it doesn't
+know the setting; set DATA MOD to LAN on the radio yourself.
 
 ## rigctld (CAT control)
 
@@ -97,8 +153,9 @@ On by default, listening on `127.0.0.1:4532` (the standard hamlib port). Use
 `0.0.0.0` to allow clients from other machines on your LAN.
 
 **WSJT-X / JTDX / JS8Call** (Settings → Radio): Rig `Hamlib NET rigctl`,
-Network Server `127.0.0.1:4532`, PTT Method `VOX` for now, Mode `Data/Pkt`
-or `USB`, Split `None`. Click *Test CAT*.
+Network Server `127.0.0.1:4532`, PTT Method `CAT`, Mode `Data/Pkt` or `USB`,
+Split `None`. Click *Test CAT*, then *Test PTT*. Settings → Audio: input =
+the receive cable, output = the transmit cable (see above).
 
 **fldigi** (Configure → Rig Control → Hamlib): rig `Hamlib NET rigctl`, device
 `127.0.0.1:4532`.
@@ -123,6 +180,10 @@ Modes:
 The passband a client sends is ignored: the radio keeps its selected filter,
 and `m` reports that filter's actual width. While the radio is disconnected,
 reads return the last known values and changes fail with `RPRT -6`.
+
+`T 1` is refused with `RPRT -9` when the transmit rules above aren't met
+(the reason appears in the status bar). PTT keyed by a client is released if
+that client disconnects.
 
 ## Connection test (command line)
 
@@ -160,7 +221,9 @@ IC-7300MK2. Covered:
   capabilities capture
 - login, bad password, radio in use by another client, clean disconnect
 - CI-V reads, transceive broadcasts, frequency/mode/DATA/filter control
-- rigctld: frequency, mode mapping, passband reporting, PTT refusal, dump_state
+- rigctld: frequency, mode mapping, passband reporting, PTT and its release on client disconnect, dump_state
+- transmit: framing/resampling, the PTT rules and every unkey trigger, audio sent only while keyed
+- DATA MOD: switch, restore, crash recovery from the record on disk, manual restore
 - audio continuity, with dropped packets recovered by retransmit; audio timeout
 - the GUI, run offscreen against the fake radio (needs PySide6; skipped otherwise)
 
@@ -183,6 +246,8 @@ icomremote/
   sinks.py          sound card (clock-drift locked) and WAV outputs
   resample.py       streaming resampler
   timerres.py       1 ms timer resolution on Windows while connected
+  txaudio.py        transmit audio capture and 20 ms framing
+  restore.py        on-disk record of radio settings to put back
   probe.py          command-line connection test
   rsba1/            RS-BA1 protocol: packets, passcode, reorder buffer, UDP streams
 tests/              fake radio + unit, end-to-end and GUI tests

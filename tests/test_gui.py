@@ -39,6 +39,8 @@ class TestGui(unittest.TestCase):
         settings.setValue("rig_enable", False)            # don't grab port 4532
         self.radio = FakeRadio(mode=0x01, data=False).start()
         self.w = MainWindow(settings=settings)
+        from icomremote.restore import RestoreStore
+        self.w.radio._store = RestoreStore(self.tmp)     # keep restore records out of your config dir
         self.w.show()
 
     def tearDown(self):
@@ -82,9 +84,32 @@ class TestGui(unittest.TestCase):
         self.radio.push_freq(3_573_000)                     # VFO turned on the radio
         self.assertTrue(self.pump_until(lambda: w.freq.value() == 3573.0))
 
+        # ---- transmit
+        from test_tx import FakeSource
+        self.assertTrue(self.pump_until(lambda: "LAN (was USB" in w.data_mod_label.text()))
+        self.assertTrue(w.restore_btn.isEnabled())
+        w.radio._tx_source_factory = FakeSource
+        w.radio.set_tx_device("fake")
+        w.mode_buttons["USB"].click()
+        self.assertTrue(self.pump_until(lambda: self.radio.mode == 0x01))
+        w.data_btn.click()                                  # DATA off -> plain USB
+        self.assertTrue(self.pump_until(lambda: not self.radio.data and not w.data_btn.isChecked()))
+        w.ptt_btn.click()                                   # refused: not a data mode
+        self.assertTrue(self.pump_until(lambda: "only allowed in data modes" in w.statusBar().currentMessage()))
+        self.assertFalse(w.ptt_btn.isChecked())
+        self.assertFalse(self.radio.ptt)
+        w.data_btn.click()
+        self.assertTrue(self.pump_until(lambda: self.radio.data and w.radio._tx_source is not None))
+        w.ptt_btn.click()
+        self.assertTrue(self.pump_until(lambda: self.radio.ptt and w.tx_indicator.text() == "TX"))
+        self.assertTrue(self.pump_until(lambda: w.tx_level.value() > 0))
+        w.ptt_btn.click()
+        self.assertTrue(self.pump_until(lambda: not self.radio.ptt and w.tx_indicator.text() == "RX"))
+
         w._connect_clicked()                                # Disconnect
         self.assertTrue(self.pump_until(lambda: not w.freq.isEnabled()
                                         and w.connect_btn.text() == "Connect"))
+        self.assertEqual(self.radio.menu[b"\x00\x85"], 0x01)      # DATA MOD put back to USB
 
 
 if __name__ == "__main__":

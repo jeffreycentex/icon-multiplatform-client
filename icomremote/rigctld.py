@@ -10,12 +10,15 @@ Supported commands (short and long forms, plain and '+' extended responses):
   m get_mode            M set_mode <mode> <passband>   (passband ignored: the
                                                         radio's filter stays)
   v get_vfo             V set_vfo <vfo>
-  t get_ptt             T set_ptt <0|1>        (step 3; refused for now)
+  t get_ptt             T set_ptt <0|1>        (refused unless the radio is in a DATA
+                                                mode; RPRT -9 with a log line)
   s get_split_vfo       S set_split_vfo        (always split off)
   l get_level <LEVEL>   STRENGTH = S-meter in dB relative to S9
   L set_level           accepted, ignored
   \\dump_state  \\chk_vfo  \\get_powerstat  \\get_lock_mode  q/Q
 A leading VFO argument ('f VFOA', 'l VFOA STRENGTH') is accepted and ignored.
+
+PTT keyed by a client is released when that client disconnects.
 
 Modes: PKTUSB/PKTLSB/PKTAM/PKTFM select the radio's DATA modes. Plain
 USB/LSB also select DATA (USB-D/LSB-D) unless plain_ssb_is_data is off.
@@ -28,12 +31,14 @@ import socketserver
 import threading
 
 from . import civ
+from .session import PttRefused
 from .state import HAMLIB_BITS, hamlib_mode, rig_mode_from_hamlib
 
 log = logging.getLogger(__name__)
 
 E_INVAL = -1
 E_IO = -6
+E_REJECTED = -9
 E_NAVAIL = -11
 
 # short char -> (long name, takes VFO-optional args)
@@ -68,7 +73,8 @@ def _dump_state(lo_hz, hi_hz):
         "0",                    # ITU region
         "%f %f 0x%x -1 -1 0x1 0x1" % (float(lo_hz), float(hi_hz), allm),
         "0 0 0 0 0 0 0",        # end rx ranges
-        "0 0 0 0 0 0 0",        # end tx ranges (TX arrives in step 3)
+        "%f %f 0x%x 1000 100000 0x1 0x1" % (float(max(lo_hz, 1_800_000)), float(hi_hz), allm),
+        "0 0 0 0 0 0 0",        # end tx ranges
     ]
     for step in (1, 10, 100, 1000, 5000, 9000, 10000):
         lines.append("0x%x %d" % (allm, step))
@@ -79,7 +85,7 @@ def _dump_state(lo_hz, hi_hz):
     lines += ["0", "0", "0", "0"]   # max_rit max_xit max_ifshift announces
     lines += ["", ""]               # preamp, attenuator lists
     lines += ["0x0"] * 6            # get/set func, level, parm
-    lines += ["vfo_ops=0x0", "ptt_type=0x0", "done"]
+    lines += ["vfo_ops=0x0", "ptt_type=0x1", "done"]   # RIG_PTT_RIG: PTT via CAT
     return "\n".join(lines) + "\n"
 
 
@@ -98,7 +104,7 @@ class _Handler(socketserver.StreamRequestHandler):
                     continue
                 if not text.strip():
                     continue
-                reply, close = srv.handle_line(text)
+                reply, close = srv.handle_line(text, client=self)
                 if reply:
                     self.wfile.write(reply.encode("ascii", "replace"))
                     self.wfile.flush()
@@ -107,6 +113,7 @@ class _Handler(socketserver.StreamRequestHandler):
         except (ConnectionError, OSError):
             pass
         finally:
+            srv._client_gone(self)
             srv._client_count(-1, peer)
 
 
@@ -157,6 +164,12 @@ class RigctldServer:
     def clients(self):
         return self._clients
 
+    def _client_gone(self, client):
+        try:
+            self.controller.release_ptt(client)
+        except Exception:
+            log.exception("releasing PTT failed")
+
     def _client_count(self, delta, peer):
         with self._lock:
             self._clients += delta
@@ -164,7 +177,7 @@ class RigctldServer:
         self._on_activity("clients", (n, peer, delta > 0))
 
     # ------------------------------------------------------------------ protocol
-    def handle_line(self, line):
+    def handle_line(self, line, client=None):
         """Process one input line (may hold several short commands). Returns (reply, close)."""
         line = line.strip()
         extended = False
@@ -191,7 +204,7 @@ class RigctldServer:
             if long_name != "set_vfo" and args and _is_vfo(args[0]):
                 args = args[1:]           # single VFO: the target VFO doesn't matter
             try:
-                values, rc = self._dispatch(long_name, args)
+                values, rc = self._dispatch(long_name, args, client)
             except Exception as e:
                 log.debug("rigctl %s %s failed: %s", long_name, args, e)
                 values, rc = [], -1
@@ -234,7 +247,7 @@ class RigctldServer:
                 break
         return cmds
 
-    def _dispatch(self, cmd, args):
+    def _dispatch(self, cmd, args, client=None):
         c = self.controller
         st = c.rig
         known = st.freq_hz > 0
@@ -269,15 +282,20 @@ class RigctldServer:
         if cmd == "get_vfo":
             return [("VFO", "VFOA")], 0
         if cmd == "set_ptt":
-            if args and args[0] != "0":
-                log.info("rigctl: PTT requested but TX is not implemented yet")
-                return [], E_NAVAIL
+            on = bool(args) and args[0] != "0"
+            try:
+                c.set_ptt(on, owner=client)
+            except PttRefused as e:
+                log.info("rigctl: %s", e)
+                self._on_activity("refused", str(e))
+                return [], E_REJECTED
+            self._on_activity("command", "T %d" % on)
             return [], 0
         if cmd in ("set_vfo", "set_split_vfo", "set_level", "set_func", "set_parm",
                    "set_powerstat", "set_lock_mode", "set_rit", "set_xit"):
             return [], 0
         if cmd == "get_ptt":
-            return [("PTT", "0")], 0
+            return [("PTT", "1" if c.ptt else "0")], 0
         if cmd == "get_split_vfo":
             return [("Split", "0"), ("TX VFO", "VFOA")], 0
         if cmd == "get_level":
