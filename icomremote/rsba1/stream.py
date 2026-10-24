@@ -76,8 +76,16 @@ class UdpStream(asyncio.DatagramProtocol):
     # ------------------------------------------------------------------ socket
     async def open(self):
         self._loop = asyncio.get_running_loop()
-        infos = await self._loop.getaddrinfo(self.host, self.port, family=socket.AF_INET,
-                                             type=socket.SOCK_DGRAM)
+        # Resolve in this thread rather than via loop.getaddrinfo(): that goes
+        # through asyncio's thread pool, which fails on Python 3.15.0 when the
+        # loop runs in a worker thread ('lazy_import' object is not callable).
+        # An IP address resolves instantly; a host name blocks only this
+        # session thread, only for the lookup.
+        try:
+            infos = socket.getaddrinfo(self.host, self.port, family=socket.AF_INET,
+                                       type=socket.SOCK_DGRAM)
+        except socket.gaierror as e:
+            raise StreamError("cannot resolve %s: %s" % (self.host, e))
         if not infos:
             raise StreamError("cannot resolve %s" % self.host)
         addr = infos[0][4]

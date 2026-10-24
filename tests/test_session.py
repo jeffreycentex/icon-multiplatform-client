@@ -154,6 +154,16 @@ class TestSession(unittest.TestCase):
                                              for t, _ in self.events.kinds("status")), 9))
         self.assertTrue(wait_for(lambda: self.radio.logins >= 2, 5))
 
+    def test_host_name_and_bad_name(self):
+        spec = self._start()
+        self.session.connect(ConnectionSpec("localhost", "beer", "beerbeer", spec.control_port,
+                                            spec.serial_port, spec.audio_port))
+        self.assertTrue(wait_for(lambda: self.session.connected))
+        self.session.disconnect()
+        self.session.connect(ConnectionSpec("no-such-radio.invalid", "u", "p"))
+        self.assertTrue(wait_for(lambda: any("cannot resolve no-such-radio.invalid" in t
+                                             for t, _ in self.events.kinds("status")), 6))
+
     def test_no_radio(self):
         self.events = _Events()
         self.session = RadioSession(self.events)

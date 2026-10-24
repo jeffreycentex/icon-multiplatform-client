@@ -14,6 +14,7 @@ Events: status (text, level) | connected bool | radio dict | rig RigState |
 """
 
 import asyncio
+import concurrent.futures
 import logging
 import threading
 import time
@@ -30,6 +31,12 @@ from .sinks import SoundCardSink, make_file_sink
 from .timerres import high_resolution_timer
 
 log = logging.getLogger(__name__)
+
+# Python 3.15 imports some stdlib modules lazily. Touch the thread-pool class
+# here, on the importing (main) thread, so asyncio never has to finish that
+# import from the session thread (seen failing on 3.15.0 with
+# "'lazy_import' object is not callable").
+_ = concurrent.futures.ThreadPoolExecutor
 
 SAMPLE_RATE = 48000
 FAST_RETRIES = 5
