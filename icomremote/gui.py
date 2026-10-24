@@ -49,13 +49,20 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         root = QVBoxLayout(central)
-        root.addWidget(self._build_radio_box())
-        root.addWidget(self._build_tune_box())
-        root.addWidget(self._build_audio_box())
-        root.addWidget(self._build_record_box())
-        root.addWidget(self._build_tx_box())
-        root.addWidget(self._build_rigctl_box())
-        root.addStretch(1)
+        cols = QHBoxLayout()
+        left = QVBoxLayout()                 # receive side
+        left.addWidget(self._build_radio_box())
+        left.addWidget(self._build_tune_box())
+        left.addWidget(self._build_audio_box())
+        left.addWidget(self._build_record_box())
+        left.addStretch(1)
+        right = QVBoxLayout()                # transmit side and CAT
+        right.addWidget(self._build_tx_box())
+        right.addWidget(self._build_rigctl_box())
+        right.addStretch(1)
+        cols.addLayout(left, 1)
+        cols.addLayout(right, 1)
+        root.addLayout(cols, 1)
         bottom = QHBoxLayout()
         bottom.addStretch(1)
         exit_btn = QPushButton("Exit")
@@ -279,11 +286,14 @@ class MainWindow(QMainWindow):
         self.ptt_timeout.setToolTip("Transmit is cut off after this long, whatever keyed it")
         self.ptt_timeout.valueChanged.connect(lambda v: setattr(self.radio, "ptt_timeout", float(v)))
         # radio settings
-        self.manage_data_mod = QCheckBox("Switch DATA MOD to LAN while connected (put back on disconnect)")
+        self.manage_data_mod = QCheckBox("DATA MOD → LAN")
+        self.manage_data_mod.setToolTip("Switch DATA MOD (data-mode audio source) to LAN while connected;\n"
+                                        "the original is saved and put back on disconnect")
         self.manage_data_mod.toggled.connect(lambda on: setattr(self.radio, "manage_data_mod", on))
-        self.manage_data_off_mod = QCheckBox("Switch DATA OFF MOD (voice) to LAN while connected "
-                                             "(put back on disconnect)")
-        self.manage_data_off_mod.setToolTip("While it is LAN, a microphone plugged into the radio is not used")
+        self.manage_data_off_mod = QCheckBox("DATA OFF MOD → LAN")
+        self.manage_data_off_mod.setToolTip("Switch DATA OFF MOD (voice-mode audio source) to LAN while\n"
+                                            "connected; the original is saved and put back on disconnect.\n"
+                                            "While it is LAN, a microphone plugged into the radio is not used.")
         self.manage_data_off_mod.toggled.connect(lambda on: setattr(self.radio, "manage_data_off_mod", on))
         self.data_mod_label = QLabel("")
         self.data_mod_label.setWordWrap(True)
@@ -305,19 +315,25 @@ class MainWindow(QMainWindow):
         row.addWidget(self.tx_indicator)
         row.addSpacing(12)
         row.addWidget(self.voice_arm)
-        row.addSpacing(12)
-        row.addWidget(QLabel("PTT timeout"))
-        row.addWidget(self.ptt_timeout)
         row.addStretch(1)
         g.addLayout(row, 4, 0, 1, 5)
+        trow = QHBoxLayout()
+        trow.addWidget(QLabel("PTT timeout"))
+        trow.addWidget(self.ptt_timeout)
+        trow.addStretch(1)
+        g.addLayout(trow, 5, 0, 1, 5)
         if sys.platform.startswith("linux") and shutil.which("pactl"):
             mk = QPushButton("Create 'IcomTX' virtual sink")
             mk.setToolTip("pactl load-module module-null-sink sink_name=IcomTX\n"
                           "WSJT-X/fldigi play to 'IcomTX'; transmit audio comes from 'Monitor of IcomTX'.")
             mk.clicked.connect(self._create_tx_sink)
             g.addWidget(mk, 1, 4)
-        g.addWidget(self.manage_data_mod, 5, 0, 1, 5)
-        g.addWidget(self.manage_data_off_mod, 6, 0, 1, 5)
+        mods = QHBoxLayout()
+        mods.addWidget(QLabel("While connected:"))
+        mods.addWidget(self.manage_data_mod)
+        mods.addWidget(self.manage_data_off_mod)
+        mods.addStretch(1)
+        g.addLayout(mods, 6, 0, 1, 5)
         g.addWidget(self.data_mod_label, 7, 0, 1, 4)
         g.addWidget(self.restore_btn, 7, 4)
         g.setColumnStretch(1, 1)
@@ -387,7 +403,7 @@ class MainWindow(QMainWindow):
         self.rig_enable.blockSignals(True)
         self.rig_enable.setChecked(s.value("rig_enable", True, type=bool))
         self.rig_enable.blockSignals(False)
-        geo = s.value("geometry")
+        geo = s.value("geometry2")
         if geo is not None:
             self.restoreGeometry(geo)
         if s.value("audio_enable", False, type=bool) and self.device_combo.currentData():
@@ -419,7 +435,7 @@ class MainWindow(QMainWindow):
         s.setValue("rig_addr", self.rig_addr.currentText())
         s.setValue("rig_port", self.rig_port.value())
         s.setValue("rig_plain_data", self.rig_plain_data.isChecked())
-        s.setValue("geometry", self.saveGeometry())
+        s.setValue("geometry2", self.saveGeometry())
 
     # ================================================================== connection
     def _connect_clicked(self, *_):

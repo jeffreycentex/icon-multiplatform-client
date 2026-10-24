@@ -95,9 +95,17 @@ connecting; it waits for audio. A classic WAV file is limited to 4 GB, about
 
 ## Virtual audio cables
 
-You need **two** virtual cables, one per direction. If receive and transmit
-share one cable, received audio would be sent back to the radio (the app
-refuses that combination).
+For data modes you need **two** virtual cables, one per direction: if receive
+and transmit share one cable, received audio would be sent back to the radio
+(the app refuses that combination). Voice needs no cable: *Audio from* is
+simply your microphone.
+
+- **Windows:** VB-CABLE gives one cable; add VB-CABLE A+B (two more) or
+  Hi-Fi Cable from the same site. All are donationware.
+- **macOS:** BlackHole 2ch and BlackHole 16ch install as two separate devices.
+- **Linux:** nothing to install. The app's buttons create two PulseAudio /
+  PipeWire null sinks (IcomRX, IcomTX); each sink's "Monitor of …" source is
+  the other end of that cable.
 
 | Direction | Windows | macOS | Linux |
 |---|---|---|---|
