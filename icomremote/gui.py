@@ -6,10 +6,10 @@ import shutil
 import sys
 import time
 
-from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal, Slot
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox,
+    QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QSlider, QSpinBox, QStatusBar, QVBoxLayout, QWidget)
 
@@ -44,6 +44,8 @@ class MainWindow(QMainWindow):
         self.rigctld = None
         self._editing_freq = False
         self._rec_started = None
+        self._space_owner = object()     # identifies space-bar keying to the session
+        self._space_down = False
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -74,6 +76,7 @@ class MainWindow(QMainWindow):
             self.audio_enable.setToolTip("PortAudio not available: %s" % sounddevice_error())
         if self.rig_enable.isChecked():
             self._toggle_rigctld(True)
+        QApplication.instance().installEventFilter(self)
 
     # ================================================================== layout
     def _build_radio_box(self):
@@ -237,11 +240,13 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_tx_box(self):
-        box = QGroupBox("Transmit (data modes only)")
+        box = QGroupBox("Transmit")
         g = QGridLayout(box)
-        self.tx_enable = QCheckBox("Audio from")
-        self.tx_enable.setToolTip("The transmit audio input: the output side of the virtual cable\n"
-                                  "WSJT-X/fldigi play into (BlackHole 2ch, CABLE Output, a monitor source)")
+        # data input
+        self.tx_enable = QCheckBox("Data from")
+        self.tx_enable.setToolTip("Transmit audio in DATA modes (USB-D …): the output side of the\n"
+                                  "virtual cable WSJT-X/fldigi play into (BlackHole 16ch, a second\n"
+                                  "VB-Cable, Monitor of IcomTX)")
         self.tx_enable.toggled.connect(self._tx_toggled)
         self.tx_combo = QComboBox()
         self.tx_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -249,27 +254,54 @@ class MainWindow(QMainWindow):
         tx_refresh = QPushButton("Refresh")
         tx_refresh.clicked.connect(self._refresh_tx_devices)
         self.tx_gain = QSlider(Qt.Horizontal, minimum=0, maximum=200, value=100)
-        self.tx_gain.setToolTip("Transmit audio gain (100% = unity). Set ALC on the radio as usual.")
+        self.tx_gain.setToolTip("Data transmit gain (100% = unity). Set ALC on the radio as usual.")
         self.tx_gain.valueChanged.connect(self._tx_gain_changed)
         self.tx_gain_label = QLabel("100%")
         self.tx_level = QProgressBar(minimum=0, maximum=100, textVisible=True)
-        self.tx_level.setFormat("input level")
+        self.tx_level.setFormat("data level")
+        # voice input
+        self.voice_enable = QCheckBox("Voice from")
+        self.voice_enable.setToolTip("Transmit audio in LSB/USB/AM/FM: your microphone.\n"
+                                     "Voice is keyed only with the armed space bar.")
+        self.voice_enable.toggled.connect(self._voice_toggled)
+        self.voice_combo = QComboBox()
+        self.voice_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.voice_combo.currentIndexChanged.connect(self._voice_device_changed)
+        self.voice_gain = QSlider(Qt.Horizontal, minimum=0, maximum=200, value=100)
+        self.voice_gain.setToolTip("Voice transmit gain (100% = unity)")
+        self.voice_gain.valueChanged.connect(self._voice_gain_changed)
+        self.voice_gain_label = QLabel("100%")
+        self.voice_level = QProgressBar(minimum=0, maximum=100, textVisible=True)
+        self.voice_level.setFormat("voice level")
+        # keying
         self.ptt_btn = QPushButton("PTT", checkable=True)
         self.ptt_btn.setMinimumWidth(90)
+        self.ptt_btn.setToolTip("Toggle transmit in DATA modes")
         self.ptt_btn.clicked.connect(self._ptt_clicked)
         self.tx_indicator = QLabel("RX")
         self.tx_indicator.setAlignment(Qt.AlignCenter)
         self.tx_indicator.setMinimumWidth(44)
         self._style_tx(False)
+        self.voice_arm = QPushButton("Voice PTT armed: hold Space", checkable=True)
+        self.voice_arm.setToolTip("While armed, holding the space bar transmits (voice in LSB/USB/AM/FM,\n"
+                                  "data in DATA modes). Releasing Space, disarming, or the window\n"
+                                  "losing focus stops transmitting. Off at every start and disconnect.")
+        self.voice_arm.toggled.connect(self._voice_arm_toggled)
+        self._style_arm(False)
         self.ptt_timeout = QSpinBox(minimum=10, maximum=600, value=180, suffix=" s")
         self.ptt_timeout.setToolTip("Transmit is cut off after this long, whatever keyed it")
         self.ptt_timeout.valueChanged.connect(lambda v: setattr(self.radio, "ptt_timeout", float(v)))
+        # radio settings
         self.manage_data_mod = QCheckBox("Switch DATA MOD to LAN while connected (put back on disconnect)")
         self.manage_data_mod.toggled.connect(lambda on: setattr(self.radio, "manage_data_mod", on))
+        self.manage_data_off_mod = QCheckBox("Switch DATA OFF MOD (voice) to LAN while connected "
+                                             "(put back on disconnect)")
+        self.manage_data_off_mod.setToolTip("While it is LAN, a microphone plugged into the radio is not used")
+        self.manage_data_off_mod.toggled.connect(lambda on: setattr(self.radio, "manage_data_off_mod", on))
         self.data_mod_label = QLabel("")
         self.data_mod_label.setWordWrap(True)
-        self.restore_btn = QPushButton("Restore DATA MOD now")
-        self.restore_btn.setToolTip("Put DATA MOD back to its original setting now.\n"
+        self.restore_btn = QPushButton("Restore now")
+        self.restore_btn.setToolTip("Put DATA MOD / DATA OFF MOD back to their original settings now.\n"
                                     "Transmit is then refused until you reconnect.")
         self.restore_btn.clicked.connect(self._restore_clicked)
         self.restore_btn.setEnabled(False)
@@ -278,27 +310,35 @@ class MainWindow(QMainWindow):
         g.addWidget(self.tx_combo, 0, 1, 1, 3)
         g.addWidget(tx_refresh, 0, 4)
         g.addWidget(QLabel("Gain"), 1, 0)
-        g.addWidget(self.tx_gain, 1, 1, 1, 2)
-        g.addWidget(self.tx_gain_label, 1, 3)
-        g.addWidget(QLabel("Level"), 2, 0)
-        g.addWidget(self.tx_level, 2, 1, 1, 3)
+        g.addWidget(self.tx_gain, 1, 1)
+        g.addWidget(self.tx_gain_label, 1, 2)
+        g.addWidget(self.tx_level, 1, 3)
+        g.addWidget(self.voice_enable, 2, 0)
+        g.addWidget(self.voice_combo, 2, 1, 1, 3)
+        g.addWidget(QLabel("Gain"), 3, 0)
+        g.addWidget(self.voice_gain, 3, 1)
+        g.addWidget(self.voice_gain_label, 3, 2)
+        g.addWidget(self.voice_level, 3, 3)
         row = QHBoxLayout()
         row.addWidget(self.ptt_btn)
         row.addWidget(self.tx_indicator)
-        row.addSpacing(16)
+        row.addSpacing(12)
+        row.addWidget(self.voice_arm)
+        row.addSpacing(12)
         row.addWidget(QLabel("PTT timeout"))
         row.addWidget(self.ptt_timeout)
         row.addStretch(1)
-        g.addLayout(row, 3, 0, 1, 5)
+        g.addLayout(row, 4, 0, 1, 5)
         if sys.platform.startswith("linux") and shutil.which("pactl"):
             mk = QPushButton("Create 'IcomTX' virtual sink")
             mk.setToolTip("pactl load-module module-null-sink sink_name=IcomTX\n"
                           "WSJT-X/fldigi play to 'IcomTX'; transmit audio comes from 'Monitor of IcomTX'.")
             mk.clicked.connect(self._create_tx_sink)
-            g.addWidget(mk, 2, 4)
-        g.addWidget(self.manage_data_mod, 4, 0, 1, 5)
-        g.addWidget(self.data_mod_label, 5, 0, 1, 4)
-        g.addWidget(self.restore_btn, 5, 4)
+            g.addWidget(mk, 1, 4)
+        g.addWidget(self.manage_data_mod, 5, 0, 1, 5)
+        g.addWidget(self.manage_data_off_mod, 6, 0, 1, 5)
+        g.addWidget(self.data_mod_label, 7, 0, 1, 4)
+        g.addWidget(self.restore_btn, 7, 4)
         g.setColumnStretch(1, 1)
         return box
 
@@ -355,8 +395,14 @@ class MainWindow(QMainWindow):
         self.radio.ptt_timeout = float(self.ptt_timeout.value())
         self.manage_data_mod.setChecked(s.value("manage_data_mod", True, type=bool))
         self.radio.manage_data_mod = self.manage_data_mod.isChecked()
+        self.manage_data_off_mod.setChecked(s.value("manage_data_off_mod", True, type=bool))
+        self.radio.manage_data_off_mod = self.manage_data_off_mod.isChecked()
         if s.value("tx_enable", False, type=bool) and self.tx_combo.currentData():
             self.tx_enable.setChecked(True)
+        self._refresh_voice_devices(select=s.value("voice_device", ""))
+        self.voice_gain.setValue(s.value("voice_gain", 100, type=int))
+        if s.value("voice_enable", False, type=bool) and self.voice_combo.currentData():
+            self.voice_enable.setChecked(True)
         self._show_pending_restores()
         self.rig_addr.setCurrentText(s.value("rig_addr", "127.0.0.1"))
         self.rig_port.setValue(s.value("rig_port", 4532, type=int))
@@ -391,6 +437,10 @@ class MainWindow(QMainWindow):
         s.setValue("tx_gain", self.tx_gain.value())
         s.setValue("ptt_timeout", self.ptt_timeout.value())
         s.setValue("manage_data_mod", self.manage_data_mod.isChecked())
+        s.setValue("manage_data_off_mod", self.manage_data_off_mod.isChecked())
+        s.setValue("voice_device", self.voice_combo.currentData() or "")
+        s.setValue("voice_enable", self.voice_enable.isChecked())
+        s.setValue("voice_gain", self.voice_gain.value())
         s.setValue("rig_enable", self.rig_enable.isChecked())
         s.setValue("rig_addr", self.rig_addr.currentText())
         s.setValue("rig_port", self.rig_port.value())
@@ -413,10 +463,13 @@ class MainWindow(QMainWindow):
         self.connect_btn.setText("Disconnect")
 
     def _set_controls_enabled(self, on):
-        for w in (self.freq, self.data_btn, self.ptt_btn,
+        for w in (self.freq, self.data_btn, self.ptt_btn, self.voice_arm,
                   *self.mode_buttons.values(), *self.filter_buttons.values()):
             w.setEnabled(on)
-        self.manage_data_mod.setEnabled(not on)     # takes effect at connect time
+        if not on:
+            self.voice_arm.setChecked(False)       # never stays armed across connections
+        self.manage_data_mod.setEnabled(not on)     # these take effect at connect time
+        self.manage_data_off_mod.setEnabled(not on)
 
     # ================================================================== tuning
     def _show_rig(self, st):
@@ -623,22 +676,120 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(str(e), 5000)
 
     def _show_data_mod(self, info):
-        v, orig, name = info["value"], info["original"], info["name"]
-        if v is None:
-            self.data_mod_label.setText("DATA MOD: unknown (set it to LAN on the radio)")
-        elif orig is not None:
-            self.data_mod_label.setText("DATA MOD: %s (was %s; put back on disconnect)"
-                                        % (name, civ.DATA_MOD_NAMES.get(orig, orig)))
-        else:
-            self.data_mod_label.setText("DATA MOD: %s" % name)
-        self.restore_btn.setEnabled(orig is not None)
+        lines = []
+        restorable = False
+        for setting in ("data_mod", "data_off_mod"):
+            m = info.get(setting)
+            if m is None:
+                continue
+            v, orig, name, label = m["value"], m["original"], m["name"], m["label"]
+            if v is None:
+                lines.append("%s: unknown (set it to LAN on the radio)" % label)
+            elif orig is not None:
+                lines.append("%s: %s (was %s; put back on disconnect)"
+                             % (label, name, civ.DATA_MOD_NAMES.get(orig, orig)))
+                restorable = True
+            else:
+                lines.append("%s: %s" % (label, name))
+        self.data_mod_label.setText("\n".join(lines))
+        self.restore_btn.setEnabled(restorable)
 
     def _show_pending_restores(self):
-        pend = self.radio.pending_restores()
-        lines = ["%s: DATA MOD is still LAN; it will be put back to %s at the next connection"
-                 % (radio, civ.DATA_MOD_NAMES.get(v.get("data_mod"), v.get("data_mod")))
-                 for radio, v in pend.items() if "data_mod" in v]
+        labels = {"data_mod": "DATA MOD", "data_off_mod": "DATA OFF MOD"}
+        lines = []
+        for radio, v in self.radio.pending_restores().items():
+            for setting, label in labels.items():
+                if setting in v:
+                    lines.append("%s: %s is still LAN; it will be put back to %s at the next connection"
+                                 % (radio, label, civ.DATA_MOD_NAMES.get(v[setting], v[setting])))
         self.data_mod_label.setText("\n".join(lines))
+
+    # ================================================================== voice
+    def _refresh_voice_devices(self, select=None):
+        current = select if isinstance(select, str) and select else self.voice_combo.currentData()
+        self.voice_combo.blockSignals(True)
+        self.voice_combo.clear()
+        devices = list_input_devices()
+        for key, label in devices:
+            self.voice_combo.addItem(label, key)
+        if not devices:
+            self.voice_combo.addItem("(no input devices found)", None)
+        idx = self.voice_combo.findData(current) if current else -1
+        if idx < 0:                       # first run: prefer a real microphone
+            for i, (key, label) in enumerate(devices):
+                if "microphone" in label.lower() or "mic" in label.lower().split():
+                    idx = i
+                    break
+        self.voice_combo.setCurrentIndex(max(idx, 0))
+        self.voice_combo.blockSignals(False)
+
+    @Slot(bool)
+    def _voice_toggled(self, on):
+        key = self.voice_combo.currentData() if on else None
+        if on and not key:
+            self.voice_enable.setChecked(False)
+            return
+        self.radio.set_tx_device(key, self.voice_gain.value() / 100.0, kind="voice")
+
+    def _voice_device_changed(self, *_):
+        if self.voice_enable.isChecked():
+            self._voice_toggled(True)
+
+    def _voice_gain_changed(self, v):
+        self.voice_gain_label.setText("%d%%" % v)
+        self.radio.set_tx_gain(v / 100.0, kind="voice")
+
+    def _style_arm(self, armed):
+        self.voice_arm.setStyleSheet("background: #e67e22; color: white; font-weight: bold" if armed else "")
+
+    @Slot(bool)
+    def _voice_arm_toggled(self, armed):
+        self._style_arm(armed)
+        if not armed:
+            self._space_release()
+        else:
+            self.statusBar().showMessage("Voice PTT armed: hold the space bar to transmit", 5000)
+
+    def _typing(self):
+        w = QApplication.focusWidget()
+        while w is not None:
+            if isinstance(w, (QLineEdit, QAbstractSpinBox)) or (isinstance(w, QComboBox) and w.isEditable()):
+                return True
+            w = w.parentWidget()
+        return False
+
+    def _space_press(self):
+        if self._space_down:
+            return
+        self._space_down = True
+        try:
+            self.radio.set_ptt(True, owner=self._space_owner, voice_ok=True)
+        except PttRefused as e:
+            self.statusBar().showMessage(str(e), 8000)
+
+    def _space_release(self):
+        if not self._space_down:
+            return
+        self._space_down = False
+        self.radio.release_ptt(self._space_owner, reason=None)
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t == QEvent.KeyRelease and ev.key() == Qt.Key_Space and self._space_down:
+            if not ev.isAutoRepeat():
+                self._space_release()             # always, whatever has focus now
+            return True
+        if t in (QEvent.KeyPress, QEvent.KeyRelease) and ev.key() == Qt.Key_Space:
+            if self.voice_arm.isChecked() and self.isActiveWindow() and not self._typing():
+                if not ev.isAutoRepeat():
+                    if t == QEvent.KeyPress:
+                        self._space_press()
+                    else:
+                        self._space_release()
+                return True                       # don't let Space click a focused button
+        elif t in (QEvent.ApplicationDeactivate, QEvent.WindowDeactivate) and self._space_down:
+            self._space_release()                 # a key release we'd never see
+        return False
 
     # ================================================================== rigctld
     @Slot(bool)
@@ -741,9 +892,10 @@ class MainWindow(QMainWindow):
         elif kind == "data_mod":
             self._show_data_mod(payload)
         elif kind == "tx_source_failed":
-            self.tx_enable.blockSignals(True)
-            self.tx_enable.setChecked(False)
-            self.tx_enable.blockSignals(False)
+            box = self.voice_enable if payload == "voice" else self.tx_enable
+            box.blockSignals(True)
+            box.setChecked(False)
+            box.blockSignals(False)
         elif kind == "rig_refused":
             self.statusBar().showMessage("rigctl: %s" % payload, 8000)
         elif kind == "rig_command":
@@ -754,8 +906,9 @@ class MainWindow(QMainWindow):
             wall = time.monotonic() - self._rec_started
             self.rec_label.setText("Recording  %02d:%02d:%02d" % (wall // 3600, wall % 3600 // 60, wall % 60)
                                    + ("" if self.radio.connected else "  (waiting for audio)"))
-        lvl = self.radio.tx_level()
-        self.tx_level.setValue(int(100 * min(1.0, lvl)) if lvl is not None else 0)
+        for kind, bar in (("data", self.tx_level), ("voice", self.voice_level)):
+            lvl = self.radio.tx_level(kind)
+            bar.setValue(int(100 * min(1.0, lvl)) if lvl is not None else 0)
         stats = self.radio.audio_stats()
         if stats:
             self.audio_stats.setText("buffer %.0f ms   clock trim %+.0f ppm   underruns %d"
@@ -764,6 +917,8 @@ class MainWindow(QMainWindow):
             self.audio_stats.setText("")
 
     def closeEvent(self, ev):
+        QApplication.instance().removeEventFilter(self)
+        self._space_release()
         self._save_settings()
         if self.rigctld is not None:
             self.rigctld.stop()

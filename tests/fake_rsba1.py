@@ -98,7 +98,7 @@ class _Port(asyncio.DatagramProtocol):
 class FakeRadio:
     def __init__(self, user="beer", password="beerbeer", name="IC-7300MK2", civ_address=0xB6,
                  freq_hz=14_074_000, mode=0x01, data=True, filt=1, drop_audio=(), send_audio=True,
-                 in_use_by=None, data_mod=0x01, lan_mod_level=128, menu_ng=False):
+                 in_use_by=None, data_mod=0x01, data_off_mod=0x00, lan_mod_level=128, menu_ng=False):
         self.user, self.password = user, password
         self.name = name
         self.civ_address = civ_address
@@ -106,7 +106,7 @@ class FakeRadio:
         self.drop_audio = set(drop_audio)
         self.send_audio = send_audio
         self.in_use_by = in_use_by          # (computer, ip) of another client holding the radio
-        self.menu = {b"\x00\x85": data_mod, b"\x00\x83": lan_mod_level}
+        self.menu = {b"\x00\x85": data_mod, b"\x00\x84": data_off_mod, b"\x00\x83": lan_mod_level}
         self.menu_ng = menu_ng               # radio that doesn't know these menu items
         self.menu_writes = []
         self.ptt = False
@@ -308,7 +308,7 @@ class FakeRadio:
                 return echo + [mk(civ.NG)]
             if len(payload) == 3:
                 v = self.menu[item]
-                data = bytes([civ.bcd_byte(v)]) if item == b"\x00\x85" else civ.encode_level(v)
+                data = bytes([civ.bcd_byte(v)]) if item != b"\x00\x83" else civ.encode_level(v)
                 return echo + [mk(0x1A, 0x05, item + data)]
             v = civ.bcd_value(payload[3]) if len(payload) == 4 else civ.decode_level(payload[3:5])
             self.menu[item] = v

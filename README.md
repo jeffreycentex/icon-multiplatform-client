@@ -114,30 +114,55 @@ System Settings → Privacy & Security → Microphone.
 
 ## Transmit
 
-Transmit is for data modes only. PTT, from the **PTT** button or from rigctl
-(`T 1`), is refused unless:
+Two transmit inputs:
 
-- the radio is in a DATA mode (USB-D, LSB-D, AM-D, FM-D),
-- a transmit audio input is selected (*Audio from*), and
-- DATA MOD is LAN.
+- **Data from**: the transmit virtual cable (e.g. BlackHole 16ch). Used when
+  the radio is in a DATA mode (USB-D, LSB-D, AM-D, FM-D).
+- **Voice from**: your microphone. Used when the radio is in LSB, USB, AM or FM.
+
+Each has its own gain and level meter. At key-down the app asks the radio for
+its DATA state and picks the input from the radio's answer.
+
+### Keying
+
+| Control | Data modes | Voice modes |
+|---|---|---|
+| **PTT** button (toggle) | yes | refused |
+| rigctl `T 1` (WSJT-X, fldigi …) | yes | refused (`RPRT -9`) |
+| **Space bar**, held, while **Voice PTT armed** is on | yes | yes |
+
+The space bar does nothing unless **Voice PTT armed** is switched on. Arming
+starts off every time the app starts and is switched off on every disconnect.
+Space keys only while the app's window is focused and you're not typing in a
+text field. Releasing Space unkeys, whatever has focus by then, and so does
+disarming or the window losing focus.
+
+Keying is refused unless:
+
+- **data:** a data input is selected and DATA MOD is LAN
+- **voice:** it comes from the armed space bar, a voice input is selected, and
+  DATA OFF MOD is LAN
 
 Transmit stops (PTT released) when:
 
 - the **PTT timeout** expires (default 180 s, whatever keyed it),
-- the radio leaves DATA mode, from the app or on the radio's front panel,
+- the radio switches between voice and DATA while keyed, from the app or on the radio's front panel,
 - you disconnect or quit, or the connection fails,
-- the transmit audio input is changed or disappears,
+- the transmit input in use is changed or disappears,
 - the rigctl client that keyed PTT disconnects (e.g. WSJT-X crashes mid-transmission).
 
 Audio is only sent to the radio while PTT is on. The **TX/RX** indicator shows
 what the radio reports, not just what was requested.
 
-### DATA MOD
+### DATA MOD and DATA OFF MOD
 
-With *Switch DATA MOD to LAN while connected* on (the default), the app reads
-the radio's DATA MOD setting when it connects, writes the original value to
-disk, then sets DATA MOD to LAN. When you disconnect or quit, it puts the
-original back and confirms it by reading it back.
+The radio takes transmit audio from **DATA MOD** in DATA modes and from
+**DATA OFF MOD** in voice modes. Each has its own checkbox (both on by
+default). For each one switched on, the app reads the radio's setting when it
+connects, writes the original value to disk, then sets it to LAN. When you
+disconnect or quit, it puts the original back and confirms it by reading it
+back. While DATA OFF MOD is LAN, a microphone plugged into the radio is not
+used.
 
 If the app can't put it back (the app is killed, the computer loses power,
 the network drops), the original value stays recorded in `restore.json` in
@@ -148,8 +173,8 @@ the app's settings folder:
 - Linux: `~/.config/icomremote/`
 
 The next connection to that radio restores it on disconnect, and the window
-shows the pending restore while you're disconnected. **Restore DATA MOD now**
-puts it back immediately (transmit is then refused until you reconnect). At
+shows the pending restore while you're disconnected. **Restore now** puts
+both back immediately (transmit is then refused until you reconnect). At
 the radio without the app, change DATA MOD on the front panel (on the IC-7300
 and IC-705: Menu → Set →
 Connectors → MOD Input → DATA MOD).
@@ -157,8 +182,8 @@ Connectors → MOD Input → DATA MOD).
 On connect the app also warns if *LAN MOD Level* is 0 %, which would make
 transmit silent.
 
-DATA MOD switching is implemented for the IC-7300MK2 (CI-V `1A 05 00 85`,
-from Icom's CI-V reference). For other models the app reports that it doesn't
+Switching is implemented for the IC-7300MK2 (CI-V `1A 05 00 85` DATA MOD,
+`1A 05 00 84` DATA OFF MOD, from Icom's CI-V reference). For other models the app reports that it doesn't
 know the setting; set DATA MOD to LAN on the radio yourself.
 
 ## rigctld (CAT control)
@@ -236,7 +261,9 @@ IC-7300MK2. Covered:
 - login, bad password, radio in use by another client, clean disconnect
 - CI-V reads, transceive broadcasts, frequency/mode/DATA/filter control
 - rigctld: frequency, mode mapping, passband reporting, PTT and its release on client disconnect, dump_state
-- transmit: framing/resampling, the PTT rules and every unkey trigger, audio sent only while keyed
+- transmit: framing/resampling, data and voice inputs, the PTT rules and every unkey trigger,
+  audio sent only while keyed, rapid press/release never leaving the radio keyed
+- the armed space bar (GUI test): disarmed, typing, focus moving while held, disarm while keyed
 - DATA MOD: switch, restore, crash recovery from the record on disk, manual restore
 - audio continuity, with dropped packets recovered by retransmit; audio timeout
 - recording: WAV (and M4A when PyAV is installed), including starting before connecting

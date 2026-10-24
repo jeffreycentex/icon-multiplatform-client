@@ -46,6 +46,9 @@ SLOW_RETRY_DELAY = 65.0     # the IC-705 drops audio if you re-login too often
 POLL_INTERVAL = 0.5
 STATS_INTERVAL = 1.0
 DEFAULT_PTT_TIMEOUT = 180.0
+# Menu settings the app switches to LAN while connected: key -> (label, item table)
+MOD_SETTINGS = {"data_mod": ("DATA MOD", civ.DATA_MOD_ITEM),
+                "data_off_mod": ("DATA OFF MOD", civ.DATA_OFF_MOD_ITEM)}
 FENCE_SECONDS = 1.5
 CIV_ANSWER_TIMEOUT = 1.0
 
@@ -106,6 +109,12 @@ class RadioSession:
         self._replies = dict.fromkeys(civ.READ_GROUPS, 0)
         self._fence = {}
         self._keying = False             # key-down requested, waiting for the DATA check
+        # PTT requests: the newest one wins. Callers set the desired state
+        # (self.ptt, owner) under the lock and bump the sequence; the loop applies
+        # a request only if it is still the newest, so a stale release can never
+        # clear a newer press (or a stale press re-key after a release).
+        self._ptt_lock = threading.RLock()
+        self._ptt_seq = 0
         # transmit
         self.ptt = False                 # what we commanded
         self.tx = False                  # what the radio reports (1C 00)
@@ -113,13 +122,14 @@ class RadioSession:
         self._keyed = False              # loop-thread view of self.ptt
         self._ptt_owner = None
         self._ptt_timer = None
-        self._tx_device = None           # (key, gain)
-        self._tx_source = None
+        self._tx_devices = {"data": None, "voice": None}   # kind -> (key, gain)
+        self._tx_sources = {}            # kind -> open source
+        self._tx_kind = None             # "data" or "voice" while keyed
+        self._key_voice_ok = False       # current key-down request allows voice
         self._tx_source_factory = None   # tests inject a fake source
-        # DATA MOD management
-        self.manage_data_mod = True
-        self.data_mod = None             # current value as last read, None = unknown
-        self._data_mod_original = None   # value to put back, None = nothing to restore
+        # DATA MOD / DATA OFF MOD management: setting -> state
+        self.mods = {k: {"value": None, "original": None, "item": None, "manage": True}
+                     for k in MOD_SETTINGS}
         self._store = RestoreStore(state_dir)
 
     # ------------------------------------------------------------------ events
@@ -172,7 +182,7 @@ class RadioSession:
 
     def shutdown(self):
         self.disconnect()
-        self._close_tx_source()
+        self._close_tx_sources()
         self.stop_recording()
         self._install_sink("card", None)
 
@@ -257,8 +267,8 @@ class RadioSession:
             for f in (civ.read_freq(addr), civ.read_mode(addr), civ.read_data_mode(addr),
                       civ.read_if_width(addr), civ.read_ptt(addr)):
                 self._tx_civ(f)
-            await self._setup_data_mod(info.radio_name, spec.host)
-            self._open_tx_source()
+            await self._setup_mods(info.radio_name, spec.host)
+            self._open_tx_sources()
             tasks.append(loop.create_task(self._poll_loop(addr)))
             tasks.append(loop.create_task(self._stats_loop()))
 
@@ -279,13 +289,13 @@ class RadioSession:
             # Unkey and put radio settings back while the serial stream may still work.
             if serial is not None and not serial.closed:
                 try:
-                    self._ptt_apply(False, reason=None)
+                    self._unkey()
                     await self._restore_data_mod()
                 except Exception:
                     log.exception("cleanup before logout failed")
             else:
-                self._ptt_apply(False, reason=None)
-            self._close_tx_source()
+                self._unkey()
+            self._close_tx_sources()
             self._set_connected(False)
             # Same order as kappanhang: deauth + close control, then serial, then audio.
             if control is not None:
@@ -402,9 +412,11 @@ class RadioSession:
                 if changed:
                     self._emit("rig", st)
                 # (a key-down still waiting for its check is refused by _key_after_check)
-                if self._keyed and st.mode and not st.data:
-                    self._ptt_apply(False, reason="Unkeyed: the radio left DATA mode (now %s)"
-                                    % st.mode_label)
+                if self._keyed and st.mode and st.data != (self._tx_kind == "data"):
+                    self._unkey(reason=(
+                        "Unkeyed: the radio left DATA mode (now %s)" % st.mode_label
+                        if self._tx_kind == "data" else
+                        "Unkeyed: the radio switched to %s while transmitting voice" % st.mode_label))
             elif kind == "ptt":
                 tx = value != 0
                 if tx != self.tx:
@@ -522,8 +534,9 @@ class RadioSession:
         filt = filt or self.rig.filter or 1
         if filt not in (1, 2, 3):
             raise ValueError("filter must be 1-3")
-        if self.ptt and not data:
-            self.set_ptt(False, reason="Unkeyed: switching to %s (not a data mode)" % civ_mode)
+        if self.ptt and bool(data) != self.rig.data:
+            self.set_ptt(False, reason="Unkeyed: switching to %s while transmitting"
+                         % (civ_mode + ("-D" if data else "")))
         a = self.civ_address
         st = replace(self.rig, mode=civ_mode, data=bool(data), filter=filt, if_width_index=-1)
         frames = [civ.set_mode(a, civ_mode, filt), civ.set_data_mode(a, data, filt),
@@ -538,49 +551,104 @@ class RadioSession:
         return self.set_mode(self.rig.mode, self.rig.data, filt)
 
     # ------------------------------------------------------------------ PTT
-    # Safety rules: PTT only in a DATA mode (USB-D etc.), only with a TX audio
-    # input selected and DATA MOD on LAN; unkeyed after ptt_timeout seconds, on
-    # leaving DATA mode, on disconnect/shutdown, when the TX input goes away,
-    # and (via rigctld) when the client that keyed disconnects.
+    # Safety rules
+    #   Data (radio in USB-D etc.): data TX input selected, DATA MOD = LAN.
+    #   Voice (radio in LSB/USB/AM/FM): only when the caller allows voice (the
+    #   GUI's armed space bar; never rigctl or the PTT button), voice TX input
+    #   selected, DATA OFF MOD = LAN.
+    #   Key-down asks the radio for its DATA state first and decides from the
+    #   radio's answer, not from the app's copy.
+    #   Unkeyed after ptt_timeout, on any voice<->data switch, on disconnect /
+    #   shutdown, when the TX input in use changes, and (via rigctld) when the
+    #   client that keyed disconnects.
 
-    def ptt_refusal(self):
+    @property
+    def data_mod(self):
+        return self.mods["data_mod"]["value"]
+
+    @property
+    def manage_data_mod(self):
+        return self.mods["data_mod"]["manage"]
+
+    @manage_data_mod.setter
+    def manage_data_mod(self, on):
+        self.mods["data_mod"]["manage"] = bool(on)
+
+    @property
+    def manage_data_off_mod(self):
+        return self.mods["data_off_mod"]["manage"]
+
+    @manage_data_off_mod.setter
+    def manage_data_off_mod(self, on):
+        self.mods["data_off_mod"]["manage"] = bool(on)
+
+    def _rule_violation(self, data, mode, voice_ok):
+        """Why keying is not allowed for a radio in (mode, data), or None."""
+        kind = "data" if data else "voice"
+        if kind == "voice":
+            if not voice_ok:
+                return ("transmit from programs and the PTT button is only allowed in data modes "
+                        "(USB-D, LSB-D, AM-D, FM-D); the radio is in %s" % civ.RigState(mode=mode).mode_label)
+            if mode not in ("LSB", "USB", "AM", "FM"):
+                return "voice transmit is only offered in LSB/USB/AM/FM; the radio is in %s" % mode
+        if kind not in self._tx_sources:
+            return "no transmit audio input selected for %s" % kind
+        setting = "data_mod" if kind == "data" else "data_off_mod"
+        v = self.mods[setting]["value"]
+        if v is not None and v != civ.DATA_MOD_LAN:
+            return "%s is %s, not LAN" % (MOD_SETTINGS[setting][0], civ.DATA_MOD_NAMES.get(v, v))
+        return None
+
+    def ptt_refusal(self, voice_ok=False):
         """Why PTT can't be keyed now, or None if it can."""
         if not self._connected:
             return "not connected to the radio"
         if not self.rig.mode:
             return "the radio's mode is not known yet"
-        if not self.rig.data:
-            return ("transmit is only allowed in data modes (USB-D, LSB-D, AM-D, FM-D); "
-                    "the radio is in %s" % self.rig.mode_label)
-        if self._tx_source is None:
-            return "no transmit audio input selected"
-        if self.data_mod is not None and self.data_mod != civ.DATA_MOD_LAN:
-            return "DATA MOD is %s, not LAN" % civ.DATA_MOD_NAMES.get(self.data_mod, self.data_mod)
-        return None
+        return self._rule_violation(self.rig.data, self.rig.mode, voice_ok)
 
-    def set_ptt(self, on, owner=None, reason=None):
-        """Thread-safe. Raises PttRefused when keying isn't allowed."""
-        if on:
-            why = self.ptt_refusal()
-            if why:
-                raise PttRefused("PTT refused: " + why)
-        elif not self.ptt:
-            return
-        self.ptt = bool(on)
+    def set_ptt(self, on, owner=None, reason=None, voice_ok=False):
+        """Thread-safe. Raises PttRefused when keying isn't allowed.
+        voice_ok: allow transmitting in a voice mode (GUI space bar only)."""
+        with self._ptt_lock:
+            if on:
+                why = self.ptt_refusal(voice_ok)
+                if why:
+                    raise PttRefused("PTT refused: " + why)
+            elif not self.ptt:
+                return
+            self._ptt_seq += 1
+            seq = self._ptt_seq
+            self.ptt = bool(on)
+            self._ptt_owner = owner if on else None
         loop = self._loop
         if loop is not None and not loop.is_closed():
-            loop.call_soon_threadsafe(self._ptt_apply, bool(on), owner, reason)
+            loop.call_soon_threadsafe(self._ptt_request, seq, bool(on), reason, voice_ok)
 
-    def release_ptt(self, owner):
+    def release_ptt(self, owner, reason="Unkeyed: the rigctl client that keyed PTT disconnected"):
         """Unkey if `owner` keyed (rigctld calls this when a client disconnects)."""
-        if self.ptt and self._ptt_owner is owner:
-            self.set_ptt(False, reason="Unkeyed: the rigctl client that keyed PTT disconnected")
+        with self._ptt_lock:
+            if self.ptt and self._ptt_owner is owner:
+                self.set_ptt(False, reason=reason)
 
-    def _ptt_apply(self, on, owner=None, reason=None):
-        """Loop thread (or teardown). Key-down asks the radio for its DATA mode
-        first and keys only if the radio itself confirms DATA is on."""
+    def _ptt_request(self, seq, on, reason, voice_ok):
+        with self._ptt_lock:
+            if seq != self._ptt_seq:
+                return                       # superseded by a newer request or an automatic unkey
+        self._ptt_apply(on, reason, voice_ok)
+
+    def _unkey(self, reason=None):
+        """Loop thread (or teardown): unkey now, and invalidate requests in flight."""
+        with self._ptt_lock:
+            self._ptt_seq += 1
+            self.ptt = False
+            self._ptt_owner = None
+        self._ptt_apply(False, reason)
+
+    def _ptt_apply(self, on, reason=None, voice_ok=False):
+        """Loop thread. Key-down / unkey the radio and start/stop TX audio."""
         if on:
-            self._ptt_owner = owner
+            self._key_voice_ok = voice_ok
             if self._ptt_timer is not None:
                 self._ptt_timer.cancel()
             self._ptt_timer = self._loop.call_later(self.ptt_timeout, self._ptt_timed_out)
@@ -592,17 +660,17 @@ class RadioSession:
         if self._ptt_timer is not None:
             self._ptt_timer.cancel()
             self._ptt_timer = None
-        self._ptt_owner = None
-        self.ptt = False
         self._keying = False                 # cancels a key-down still waiting for its check
         if not self._keyed:
             return
         self._keyed = False
         self._tx_civ(civ.set_ptt(self.civ_address, False))
         self._tx_civ(civ.read_ptt(self.civ_address))
-        if self._tx_source is not None:
-            self._tx_source.stop()
-        log.info("PTT off")
+        src = self._tx_sources.get(self._tx_kind)
+        if src is not None:
+            src.stop()
+        log.info("PTT off (%s)", self._tx_kind)
+        self._tx_kind = None
         self._emit("ptt", False)
         if reason:
             self._status(reason, "error")
@@ -614,164 +682,196 @@ class RadioSession:
             return
         self._keying = False
         dec = self._decoder
-        if r is None or dec is None or not dec.state.data:
-            why = ("the radio did not confirm its DATA mode" if r is None or dec is None
-                   else "the radio reports %s, not a DATA mode" % dec.state.mode_label)
-            self._ptt_apply(False)
+        if r is None or dec is None:
+            why = "the radio did not confirm its DATA mode"
+        else:
+            why = self._rule_violation(dec.state.data, dec.state.mode, self._key_voice_ok)
+            if why and not dec.state.data and not self._key_voice_ok:
+                why = "the radio reports %s, not a DATA mode" % dec.state.mode_label
+        if why:
+            self._unkey()
             self._emit("ptt", False)
             self._status("PTT refused: " + why, "error")
             return
+        self._tx_kind = "data" if dec.state.data else "voice"
         self._keyed = True
-        if self._tx_source is not None:
-            self._tx_source.start()
+        self._tx_sources[self._tx_kind].start()
         self._tx_civ(civ.set_ptt(a, True))
         self._tx_civ(civ.read_ptt(a))
-        log.info("PTT on")
+        log.info("PTT on (%s)", self._tx_kind)
         self._emit("ptt", True)
 
     def _ptt_timed_out(self):
         self._ptt_timer = None
-        self._ptt_apply(False, reason="Unkeyed: PTT timeout (%.0f s)" % self.ptt_timeout)
+        self._unkey(reason="Unkeyed: PTT timeout (%.0f s)" % self.ptt_timeout)
 
     # ------------------------------------------------------------------ TX audio
-    def set_tx_device(self, device_key, gain=1.0):
-        """Select the transmit audio input (None = none). Opens it now if connected."""
-        self._tx_device = (device_key, gain) if device_key else None
+    def set_tx_device(self, device_key, gain=1.0, kind="data"):
+        """Select the data or voice transmit input (None = none). Opens it now if connected."""
+        self._tx_devices[kind] = (device_key, gain) if device_key else None
         loop = self._loop
         if self._connected and loop is not None and not loop.is_closed():
-            loop.call_soon_threadsafe(self._reopen_tx_source)
+            loop.call_soon_threadsafe(self._reopen_tx_source, kind)
 
-    def set_tx_gain(self, gain):
-        if self._tx_device:
-            self._tx_device = (self._tx_device[0], gain)
-        src = self._tx_source
+    def set_tx_gain(self, gain, kind="data"):
+        dev = self._tx_devices.get(kind)
+        if dev:
+            self._tx_devices[kind] = (dev[0], gain)
+        src = self._tx_sources.get(kind)
         if src is not None:
             src.set_gain(gain)
 
-    def tx_level(self):
-        src = self._tx_source
+    def tx_level(self, kind="data"):
+        src = self._tx_sources.get(kind)
         return src.peak if src is not None else None
 
-    def _reopen_tx_source(self):
-        if self._keyed:
-            self._ptt_apply(False, reason="Unkeyed: transmit audio input changed")
-        self._close_tx_source()
-        self._open_tx_source()
+    @property
+    def _tx_source(self):                    # the data input (kept for older callers/tests)
+        return self._tx_sources.get("data")
 
-    def _open_tx_source(self):
-        if self._tx_device is None or self._tx_source is not None:
+    def _reopen_tx_source(self, kind):
+        if self._keyed and self._tx_kind == kind:
+            self._unkey(reason="Unkeyed: transmit audio input changed")
+        self._close_tx_source(kind)
+        self._open_tx_source(kind)
+
+    def _open_tx_sources(self):
+        for kind in ("data", "voice"):
+            self._open_tx_source(kind)
+
+    def _open_tx_source(self, kind):
+        dev = self._tx_devices.get(kind)
+        if dev is None or kind in self._tx_sources:
             return
-        key, gain = self._tx_device
+        key, gain = dev
         try:
             if self._tx_source_factory is not None:
                 src = self._tx_source_factory(key, gain)
             else:
                 from .txaudio import SoundCardSource
                 src = SoundCardSource(key, gain)
-            src.open(self._on_tx_frame)
+            src.open(lambda pcm, k=kind: self._on_tx_frame(pcm, k))
         except Exception as e:
             log.exception("TX input open failed")
-            self._status("Transmit audio input failed: %s" % e, "error")
-            self._emit("tx_source_failed", str(e))
+            self._status("%s transmit input failed: %s" % (kind.capitalize(), e), "error")
+            self._emit("tx_source_failed", kind)
             return
-        self._tx_source = src
+        self._tx_sources[kind] = src
 
-    def _close_tx_source(self):
-        src, self._tx_source = self._tx_source, None
+    def _close_tx_source(self, kind):
+        src = self._tx_sources.pop(kind, None)
         if src is not None:
             try:
                 src.close()
             except Exception:
                 pass
 
-    def _on_tx_frame(self, pcm):
+    def _close_tx_sources(self):
+        for kind in list(self._tx_sources):
+            self._close_tx_source(kind)
+
+    def _on_tx_frame(self, pcm, kind):
         """Called on the capture thread with one 20 ms frame."""
         loop = self._loop
         if loop is not None and not loop.is_closed():
             try:
-                loop.call_soon_threadsafe(self._send_tx_frame, pcm)
+                loop.call_soon_threadsafe(self._send_tx_frame, pcm, kind)
             except RuntimeError:
                 pass
 
-    def _send_tx_frame(self, pcm):
-        if self._keyed and self._audio is not None and not self._audio.closed:
+    def _send_tx_frame(self, pcm, kind):
+        if self._keyed and kind == self._tx_kind and self._audio is not None and not self._audio.closed:
             self._audio.send_frame(pcm)
 
-    # ------------------------------------------------------------------ DATA MOD
+    # ------------------------------------------------------------------ DATA MOD / DATA OFF MOD
     def _radio_key(self, radio_name, host):
         return "%s@%s" % (radio_name, host)
 
-    async def _setup_data_mod(self, radio_name, host):
-        """Switch DATA MOD to LAN, remembering the original on disk first."""
-        self.data_mod = None
-        self._data_mod_original = None
-        item = civ.DATA_MOD_ITEM.get(radio_name)
-        if item is None:
-            self._status("DATA MOD switching is not known for %s: set DATA MOD to LAN on the radio "
-                         "for transmit audio" % radio_name, "error")
-            return
+    async def _setup_mods(self, radio_name, host):
+        """Switch DATA MOD and DATA OFF MOD to LAN, remembering originals on disk first."""
         key = self._radio_key(radio_name, host)
-        cur = await self._read_menu(item)
-        if cur is None:
-            self._status("Could not read DATA MOD from the radio; transmit may use the wrong input", "error")
-            return
-        self.data_mod = cur
-        pending = self._store.get(key, "data_mod")
-        if pending is not None and pending != cur:
-            self._status("A previous session left DATA MOD changed; it will be restored to %s"
-                         % civ.DATA_MOD_NAMES.get(pending, pending))
-        original = pending if pending is not None else cur
-        if self.manage_data_mod and cur != civ.DATA_MOD_LAN:
-            self._store.put(key, "data_mod", original)          # on disk before touching the radio
-            self._data_mod_original = original
-            if await self._write_menu(item, civ.DATA_MOD_LAN):
-                self.data_mod = civ.DATA_MOD_LAN
-                self._status("DATA MOD switched from %s to LAN (restored when you disconnect)"
-                             % civ.DATA_MOD_NAMES.get(original, original))
-            else:
-                self._status("Could not switch DATA MOD to LAN", "error")
-        elif original != civ.DATA_MOD_LAN:
-            self._data_mod_original = original                  # pending from an earlier session
-        elif pending is not None:
-            self._store.clear(key, "data_mod")                  # original was LAN: nothing to do
-        self._data_mod_key = (item, key)
-        self._emit_data_mod()
+        for setting, (label, table) in MOD_SETTINGS.items():
+            await self._setup_mod(setting, label, table.get(radio_name), radio_name, key)
+        self._emit_mods()
         lvl_item = civ.LAN_MOD_LEVEL_ITEM.get(radio_name)
         if lvl_item is not None:
             lvl = await self._read_menu(lvl_item)
             if lvl == 0:
                 self._status("LAN MOD Level is 0 %: transmit audio will be silent", "error")
 
-    def _emit_data_mod(self):
-        self._emit("data_mod", {"value": self.data_mod, "original": self._data_mod_original,
-                                "name": civ.DATA_MOD_NAMES.get(self.data_mod, "?") if self.data_mod is not None
-                                else None})
+    async def _setup_mod(self, setting, label, item, radio_name, key):
+        m = self.mods[setting]
+        m.update(value=None, original=None, item=item, key=key)
+        if item is None:
+            self._status("%s switching is not known for %s: set %s to LAN on the radio "
+                         "for transmit audio" % (label, radio_name, label), "error")
+            return
+        cur = await self._read_menu(item)
+        if cur is None:
+            self._status("Could not read %s from the radio; transmit may use the wrong input" % label,
+                         "error")
+            return
+        m["value"] = cur
+        pending = self._store.get(key, setting)
+        if pending is not None and pending != cur:
+            self._status("A previous session left %s changed; it will be restored to %s"
+                         % (label, civ.DATA_MOD_NAMES.get(pending, pending)))
+        original = pending if pending is not None else cur
+        if m["manage"] and cur != civ.DATA_MOD_LAN:
+            self._store.put(key, setting, original)          # on disk before touching the radio
+            m["original"] = original
+            if await self._write_menu(item, civ.DATA_MOD_LAN):
+                m["value"] = civ.DATA_MOD_LAN
+                self._status("%s switched from %s to LAN (restored when you disconnect)"
+                             % (label, civ.DATA_MOD_NAMES.get(original, original)))
+            else:
+                self._status("Could not switch %s to LAN" % label, "error")
+        elif original != civ.DATA_MOD_LAN:
+            m["original"] = original                         # pending from an earlier session
+        elif pending is not None:
+            self._store.clear(key, setting)                  # original was LAN: nothing to do
 
+    def _emit_mods(self):
+        out = {}
+        for setting, (label, _) in MOD_SETTINGS.items():
+            m = self.mods[setting]
+            out[setting] = {"label": label, "value": m["value"], "original": m["original"],
+                            "name": civ.DATA_MOD_NAMES.get(m["value"], "?") if m["value"] is not None else None}
+        self._emit("data_mod", out)
+
+    async def _restore_mods(self):
+        ok = True
+        for setting, (label, _) in MOD_SETTINGS.items():
+            m = self.mods[setting]
+            orig = m["original"]
+            if orig is None:
+                continue
+            if await self._write_menu(m["item"], orig):
+                self._store.clear(m["key"], setting)
+                m["original"] = None
+                m["value"] = orig
+                self._status("%s restored to %s" % (label, civ.DATA_MOD_NAMES.get(orig, orig)))
+            else:
+                ok = False
+                self._status("Could not restore %s to %s; it will be restored at the next connection"
+                             % (label, civ.DATA_MOD_NAMES.get(orig, orig)), "error")
+        self._emit_mods()
+        return ok
+
+    # name kept for callers and tests
     async def _restore_data_mod(self):
-        if self._data_mod_original is None:
-            return True
-        item, key = self._data_mod_key
-        orig = self._data_mod_original
-        if await self._write_menu(item, orig):
-            self._store.clear(key, "data_mod")
-            self._data_mod_original = None
-            self.data_mod = orig
-            self._status("DATA MOD restored to %s" % civ.DATA_MOD_NAMES.get(orig, orig))
-            self._emit_data_mod()
-            return True
-        self._status("Could not restore DATA MOD to %s; it will be restored at the next connection"
-                     % civ.DATA_MOD_NAMES.get(orig, orig), "error")
-        return False
+        return await self._restore_mods()
 
     def restore_data_mod_now(self):
-        """Thread-safe: put DATA MOD back now (transmit is then refused until reconnect)."""
+        """Thread-safe: put DATA MOD / DATA OFF MOD back now (transmit is then
+        refused until reconnect)."""
         loop = self._loop
         if not self._connected or loop is None:
             raise NotConnected("not connected to the radio")
 
         async def _do():
             if self._keyed:
-                self._ptt_apply(False, reason="Unkeyed: restoring DATA MOD")
+                self._unkey(reason="Unkeyed: restoring DATA MOD")
             await self._restore_data_mod()
         asyncio.run_coroutine_threadsafe(_do(), loop)
 

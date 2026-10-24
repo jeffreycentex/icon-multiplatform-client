@@ -311,6 +311,10 @@ def set_menu(addr, item, value):
 DATA_MOD_ITEM = {
     "IC-7300MK2": b"\x00\x85",
 }
+# DATA OFF MOD: modulation source in voice modes (LSB/USB/AM/FM), same values.
+DATA_OFF_MOD_ITEM = {
+    "IC-7300MK2": b"\x00\x84",
+}
 LAN_MOD_LEVEL_ITEM = {
     "IC-7300MK2": b"\x00\x83",       # 0000-0255 = 0-100 %
 }

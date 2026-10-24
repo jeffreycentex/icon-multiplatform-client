@@ -21,6 +21,7 @@ from icomremote.session import ConnectionSpec, PttRefused, RadioSession  # noqa:
 from icomremote.txaudio import FRAME, TxFramer  # noqa: E402
 from test_session import wait_for  # noqa: E402
 
+MIC = 0x00
 USB = 0x01
 LAN = 0x05
 
@@ -30,6 +31,7 @@ class FakeSource:
 
     def __init__(self, key, gain):
         self.key, self.gain = key, gain
+        self.tone = 400 if "voice" in key else 700
         self.framer = None
         self._stop = threading.Event()
         self._phase = 0
@@ -42,7 +44,7 @@ class FakeSource:
         while not self._stop.is_set():
             t = (np.arange(882) + self._phase) / 44100.0          # 20 ms blocks
             self._phase += 882
-            self.framer.push((0.5 * np.sin(2 * np.pi * 700 * t)).astype(np.float32))
+            self.framer.push((0.5 * np.sin(2 * np.pi * self.tone * t)).astype(np.float32))
             time.sleep(0.02)
 
     def start(self):
@@ -126,12 +128,15 @@ class TestDataMod(_TxBase):
     def test_switch_and_restore(self):
         self.assertTrue(wait_for(lambda: self.session.data_mod == LAN))
         self.assertEqual(self.radio.menu[b"\x00\x85"], LAN)
-        self.assertEqual(self.pending(), {"IC-7300MK2@127.0.0.1": {"data_mod": USB}})
+        self.assertEqual(self.radio.menu[b"\x00\x84"], LAN)
+        self.assertEqual(self.pending(), {"IC-7300MK2@127.0.0.1": {"data_mod": USB, "data_off_mod": MIC}})
         self.assertTrue(any("DATA MOD switched from USB to LAN" in t for t in self.statuses()))
         self.session.disconnect()
         self.assertEqual(self.radio.menu[b"\x00\x85"], USB)
+        self.assertEqual(self.radio.menu[b"\x00\x84"], MIC)
         self.assertEqual(self.pending(), {})
         self.assertTrue(any("DATA MOD restored to USB" in t for t in self.statuses()))
+        self.assertTrue(any("DATA OFF MOD restored to MIC" in t for t in self.statuses()))
 
     def test_crash_then_recover(self):
         self.assertTrue(wait_for(lambda: self.session.data_mod == LAN))
@@ -165,7 +170,7 @@ class TestDataMod(_TxBase):
 
 
 class TestDataModAlreadyLan(_TxBase):
-    radio_kw = {"data_mod": LAN, "lan_mod_level": 0}
+    radio_kw = {"data_mod": LAN, "data_off_mod": LAN, "lan_mod_level": 0}
 
     def test_untouched_and_level_warning(self):
         self.assertTrue(wait_for(lambda: self.session.data_mod == LAN))
@@ -282,6 +287,92 @@ class TestPtt(_TxBase):
         self.assertEqual(self.radio.menu[b"\x00\x85"], USB)
         # unkey happened before DATA MOD was put back
         self.assertFalse(self.session.ptt)
+
+
+def dominant_hz(pcm_bytes):
+    y = np.frombuffer(bytes(pcm_bytes), dtype="<i2").astype(float)[:24000]
+    spec = np.abs(np.fft.rfft(y))
+    return np.argmax(spec) * 48000 / len(y)
+
+
+class TestVoicePtt(_TxBase):
+    def _ready(self, plain=True):
+        self.session.set_tx_device("fake-data", 1.0, kind="data")
+        self.session.set_tx_device("fake-voice", 1.0, kind="voice")
+        self.session.set_mode("USB", not plain)
+        self.assertTrue(wait_for(lambda: self.radio.data == (not plain) and len(self.session._tx_sources) == 2
+                                 and self.session.mods["data_off_mod"]["value"] == LAN))
+
+    def test_voice_needs_voice_ok(self):
+        self._ready()
+        with self.assertRaisesRegex(PttRefused, "only allowed in data modes"):
+            self.session.set_ptt(True)                       # PTT button / rigctl
+        self.assertEqual(self.radio.ptt_log, [])
+
+    def test_voice_transmit_uses_voice_input(self):
+        self._ready()
+        self.session.set_ptt(True, owner="space", voice_ok=True)
+        self.assertTrue(wait_for(lambda: self.radio.ptt))
+        self.assertEqual(self.session._tx_kind, "voice")
+        n0 = len(self.radio.tx_audio)
+        time.sleep(0.8)
+        self.session.set_ptt(False)
+        self.assertTrue(wait_for(lambda: not self.radio.ptt))
+        self.assertAlmostEqual(dominant_hz(self.radio.tx_audio[n0:]), 400, delta=5)   # the mic, not data
+
+    def test_data_mode_still_uses_data_input(self):
+        self._ready(plain=False)
+        self.session.set_ptt(True, owner="space", voice_ok=True)    # space bar in USB-D: data input
+        self.assertTrue(wait_for(lambda: self.radio.ptt))
+        self.assertEqual(self.session._tx_kind, "data")
+        n0 = len(self.radio.tx_audio)
+        time.sleep(0.8)
+        self.session.set_ptt(False)
+        self.assertTrue(wait_for(lambda: not self.radio.ptt))
+        self.assertAlmostEqual(dominant_hz(self.radio.tx_audio[n0:]), 700, delta=5)
+
+    def test_switching_to_data_unkeys_voice(self):
+        self._ready()
+        self.session.set_ptt(True, owner="space", voice_ok=True)
+        self.assertTrue(wait_for(lambda: self.radio.ptt))
+        self.radio.data = True                                    # DATA pressed on the radio
+        self.assertTrue(wait_for(lambda: not self.radio.ptt, 4))
+        self.assertTrue(any("while transmitting voice" in t for t in self.statuses()))
+
+    def test_voice_without_voice_input_refused(self):
+        self.session.set_mode("USB", False)
+        self.assertTrue(wait_for(lambda: self.session.mods["data_off_mod"]["value"] == LAN))
+        with self.assertRaisesRegex(PttRefused, "no transmit audio input selected for voice"):
+            self.session.set_ptt(True, voice_ok=True)
+
+    def test_quick_release_never_sticks(self):
+        self._ready()
+        for _ in range(10):                                       # tap the space bar
+            self.session.set_ptt(True, owner="space", voice_ok=True)
+            self.session.release_ptt("space", reason=None)
+        time.sleep(0.5)
+        self.assertFalse(self.radio.ptt)
+        self.assertFalse(self.session.ptt)
+
+
+class TestVoiceDataOffModNotManaged(_TxBase):
+    def setUp(self):
+        self.state_dir = tempfile.mkdtemp()
+        self.radio = FakeRadio(mode=USB, data=False).start()
+        self.events = []
+        self.session = self._session()
+        self.session.manage_data_off_mod = False
+        self.session.connect(self._spec())
+        self.assertTrue(wait_for(lambda: self.session.connected and self.session.rig.mode == "USB"))
+
+    def test_refused_while_data_off_mod_is_mic(self):
+        self.session.set_tx_device("fake-voice", kind="voice")
+        self.assertTrue(wait_for(lambda: "voice" in self.session._tx_sources
+                                 and self.session.mods["data_off_mod"]["value"] == MIC))
+        with self.assertRaisesRegex(PttRefused, "DATA OFF MOD is MIC"):
+            self.session.set_ptt(True, voice_ok=True)
+        self.session.disconnect()
+        self.assertEqual(self.radio.menu[b"\x00\x84"], MIC)          # never touched
 
 
 class TestRigctldPtt(_TxBase):
