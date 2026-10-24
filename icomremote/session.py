@@ -125,6 +125,7 @@ class RadioSession:
         self._tx_devices = {"data": None, "voice": None}   # kind -> (key, gain)
         self._tx_sources = {}            # kind -> open source
         self._tx_kind = None             # "data" or "voice" while keyed
+        self._tx_src = None              # which source is feeding the radio while keyed
         self._key_voice_ok = False       # current key-down request allows voice
         self._tx_source_factory = None   # tests inject a fake source
         # DATA MOD / DATA OFF MOD management: setting -> state
@@ -591,8 +592,8 @@ class RadioSession:
                         "(USB-D, LSB-D, AM-D, FM-D); the radio is in %s" % civ.RigState(mode=mode).mode_label)
             if mode not in ("LSB", "USB", "AM", "FM"):
                 return "voice transmit is only offered in LSB/USB/AM/FM; the radio is in %s" % mode
-        if kind not in self._tx_sources:
-            return "no transmit audio input selected for %s" % kind
+        if self._source_kind(kind) is None:
+            return "no transmit audio input selected"
         setting = "data_mod" if kind == "data" else "data_off_mod"
         v = self.mods[setting]["value"]
         if v is not None and v != civ.DATA_MOD_LAN:
@@ -666,11 +667,12 @@ class RadioSession:
         self._keyed = False
         self._tx_civ(civ.set_ptt(self.civ_address, False))
         self._tx_civ(civ.read_ptt(self.civ_address))
-        src = self._tx_sources.get(self._tx_kind)
+        src = self._tx_sources.get(self._tx_src)
         if src is not None:
             src.stop()
         log.info("PTT off (%s)", self._tx_kind)
         self._tx_kind = None
+        self._tx_src = None
         self._emit("ptt", False)
         if reason:
             self._status(reason, "error")
@@ -694,8 +696,9 @@ class RadioSession:
             self._status("PTT refused: " + why, "error")
             return
         self._tx_kind = "data" if dec.state.data else "voice"
+        self._tx_src = self._source_kind(self._tx_kind)
         self._keyed = True
-        self._tx_sources[self._tx_kind].start()
+        self._tx_sources[self._tx_src].start()
         self._tx_civ(civ.set_ptt(a, True))
         self._tx_civ(civ.read_ptt(a))
         log.info("PTT on (%s)", self._tx_kind)
@@ -729,8 +732,17 @@ class RadioSession:
     def _tx_source(self):                    # the data input (kept for older callers/tests)
         return self._tx_sources.get("data")
 
+    def _source_kind(self, kind):
+        """Which open source serves `kind`: voice falls back to the one input
+        the GUI uses for both data and voice."""
+        if kind in self._tx_sources:
+            return kind
+        if kind == "voice" and "data" in self._tx_sources:
+            return "data"
+        return None
+
     def _reopen_tx_source(self, kind):
-        if self._keyed and self._tx_kind == kind:
+        if self._keyed and self._tx_src == kind:
             self._unkey(reason="Unkeyed: transmit audio input changed")
         self._close_tx_source(kind)
         self._open_tx_source(kind)
@@ -780,7 +792,7 @@ class RadioSession:
                 pass
 
     def _send_tx_frame(self, pcm, kind):
-        if self._keyed and kind == self._tx_kind and self._audio is not None and not self._audio.closed:
+        if self._keyed and kind == self._tx_src and self._audio is not None and not self._audio.closed:
             self._audio.send_frame(pcm)
 
     # ------------------------------------------------------------------ DATA MOD / DATA OFF MOD

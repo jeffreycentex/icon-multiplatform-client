@@ -131,44 +131,38 @@ class TestGui(unittest.TestCase):
         self.assertTrue(self.pump_until(lambda: w.voice_arm.isEnabled() and
                                         w.radio.mods["data_off_mod"]["value"] == 0x05))
         self.assertIn("DATA OFF MOD: LAN (was MIC", w.data_mod_label.text())
-        w.radio.set_tx_device("fake-voice", 1.0, kind="voice")
-        self.assertTrue(self.pump_until(lambda: "voice" in w.radio._tx_sources and w.voice_level.value() > 0))
+        w.radio.set_tx_device("fake-voice", 1.0)             # the one 'Audio from' input
+        self.assertTrue(self.pump_until(lambda: "data" in w.radio._tx_sources and w.tx_level.value() > 0))
         w.activateWindow()
         self.pump_until(lambda: w.isActiveWindow(), 2)
         if not w.isActiveWindow():
             self.skipTest("this Qt platform can't make the window active")
-        w.ptt_btn.setFocus()
 
         def space(press=True):
             (QTest.keyPress if press else QTest.keyRelease)(w, Qt.Key_Space)
             self.pump_until(lambda: False, 0.3)
 
-        space(True)                                          # not armed: nothing
+        w.host.setFocus()                                    # not armed: Space types, no PTT
+        space(True)
         space(False)
         self.assertFalse(self.radio.ptt)
 
         w.voice_arm.click()
         self.assertTrue(w.voice_arm.isChecked())
+        self.assertFalse(w.host.hasFocus())                  # arming takes focus out of the text field
         space(True)                                          # armed, plain USB: voice
         self.assertTrue(self.pump_until(lambda: self.radio.ptt and w.tx_indicator.text() == "TX"))
         self.assertEqual(w.radio._tx_kind, "voice")
         space(False)
         self.assertTrue(self.pump_until(lambda: not self.radio.ptt))
 
-        w.host.setFocus()                                    # typing in a field: Space is just a space
-        space(True)
-        space(False)
-        self.assertFalse(self.radio.ptt)
-
-        w.ptt_btn.setFocus()                                 # hold Space, focus moves into a text field
+        w.host.setFocus()                                    # armed: Space is PTT even in a text field
         space(True)
         self.assertTrue(self.pump_until(lambda: self.radio.ptt))
-        w.host.setFocus()
         space(False)
         self.assertTrue(self.pump_until(lambda: not self.radio.ptt))
 
-        w.ptt_btn.setFocus()                                 # disarming while keyed unkeys
-        space(True)
+        space(True)                                          # disarming while keyed unkeys
         self.assertTrue(self.pump_until(lambda: self.radio.ptt))
         w.voice_arm.click()
         self.assertTrue(self.pump_until(lambda: not self.radio.ptt))

@@ -114,14 +114,11 @@ System Settings → Privacy & Security → Microphone.
 
 ## Transmit
 
-Two transmit inputs:
-
-- **Data from**: the transmit virtual cable (e.g. BlackHole 16ch). Used when
-  the radio is in a DATA mode (USB-D, LSB-D, AM-D, FM-D).
-- **Voice from**: your microphone. Used when the radio is in LSB, USB, AM or FM.
-
-Each has its own gain and level meter. At key-down the app asks the radio for
-its DATA state and picks the input from the radio's answer.
+One transmit input, **Audio from**, with its gain and level meter, used for
+both data and voice: pick the transmit virtual cable (e.g. BlackHole 16ch) for
+WSJT-X / fldigi, or your microphone for voice. At key-down the app asks the
+radio for its DATA state and applies the data or voice rules below from the
+radio's answer.
 
 ### Keying
 
@@ -133,22 +130,22 @@ its DATA state and picks the input from the radio's answer.
 
 The space bar does nothing unless **Voice PTT armed** is switched on. Arming
 starts off every time the app starts and is switched off on every disconnect.
-Space keys only while the app's window is focused and you're not typing in a
-text field. Releasing Space unkeys, whatever has focus by then, and so does
-disarming or the window losing focus.
+While armed, Space is PTT anywhere in the app's window, even in a text field
+(arming also takes focus out of any field); disarm to type spaces again.
+Releasing Space unkeys, and so do disarming and the window losing focus.
 
 Keying is refused unless:
 
-- **data:** a data input is selected and DATA MOD is LAN
-- **voice:** it comes from the armed space bar, a voice input is selected, and
-  DATA OFF MOD is LAN
+- **data:** an *Audio from* input is selected and DATA MOD is LAN
+- **voice:** it comes from the armed space bar, an *Audio from* input is
+  selected, and DATA OFF MOD is LAN
 
 Transmit stops (PTT released) when:
 
 - the **PTT timeout** expires (default 180 s, whatever keyed it),
 - the radio switches between voice and DATA while keyed, from the app or on the radio's front panel,
 - you disconnect or quit, or the connection fails,
-- the transmit input in use is changed or disappears,
+- the transmit input is changed or disappears,
 - the rigctl client that keyed PTT disconnects (e.g. WSJT-X crashes mid-transmission).
 
 Audio is only sent to the radio while PTT is on. The **TX/RX** indicator shows
@@ -261,9 +258,9 @@ IC-7300MK2. Covered:
 - login, bad password, radio in use by another client, clean disconnect
 - CI-V reads, transceive broadcasts, frequency/mode/DATA/filter control
 - rigctld: frequency, mode mapping, passband reporting, PTT and its release on client disconnect, dump_state
-- transmit: framing/resampling, data and voice inputs, the PTT rules and every unkey trigger,
+- transmit: framing/resampling, one input for data and voice, the PTT rules and every unkey trigger,
   audio sent only while keyed, rapid press/release never leaving the radio keyed
-- the armed space bar (GUI test): disarmed, typing, focus moving while held, disarm while keyed
+- the armed space bar (GUI test): disarmed, armed in a text field, disarm while keyed
 - DATA MOD: switch, restore, crash recovery from the record on disk, manual restore
 - audio continuity, with dropped packets recovered by retransmit; audio timeout
 - recording: WAV (and M4A when PyAV is installed), including starting before connecting

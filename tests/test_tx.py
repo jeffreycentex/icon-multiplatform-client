@@ -342,8 +342,24 @@ class TestVoicePtt(_TxBase):
     def test_voice_without_voice_input_refused(self):
         self.session.set_mode("USB", False)
         self.assertTrue(wait_for(lambda: self.session.mods["data_off_mod"]["value"] == LAN))
-        with self.assertRaisesRegex(PttRefused, "no transmit audio input selected for voice"):
+        with self.assertRaisesRegex(PttRefused, "no transmit audio input selected"):
             self.session.set_ptt(True, voice_ok=True)
+
+    def test_one_input_serves_voice_and_data(self):
+        """The GUI has one 'Audio from' input: voice uses it when no separate voice input exists."""
+        self.session.set_tx_device("fake-voice", 1.0)          # the data slot, as the GUI does
+        self.session.set_mode("USB", False)
+        self.assertTrue(wait_for(lambda: "data" in self.session._tx_sources and not self.radio.data
+                                 and self.session.mods["data_off_mod"]["value"] == LAN))
+        self.session.set_ptt(True, owner="space", voice_ok=True)
+        self.assertTrue(wait_for(lambda: self.radio.ptt))
+        self.assertEqual((self.session._tx_kind, self.session._tx_src), ("voice", "data"))
+        n0 = len(self.radio.tx_audio)
+        time.sleep(0.6)
+        self.session.set_ptt(False)
+        self.assertTrue(wait_for(lambda: not self.radio.ptt))
+        self.assertGreater(len(self.radio.tx_audio) - n0, 40000)          # audio was sent
+        self.assertAlmostEqual(dominant_hz(self.radio.tx_audio[n0:]), 400, delta=5)
 
     def test_quick_release_never_sticks(self):
         self._ready()
