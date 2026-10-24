@@ -239,7 +239,7 @@ class TestCiv(unittest.TestCase):
         mode = civ.frame(0xE0, 0x04, None, b"\x01\x02", frm=0xB6)
         data = civ.frame(0xE0, 0x1A, 0x06, b"\x01\x01", frm=0xB6)
         ev = d.feed(echo + reply + mode + data)
-        self.assertEqual([k for k, _ in ev], ["freq", "mode", "mode"])
+        self.assertEqual([k for k, _ in ev], ["reply", "freq", "reply", "mode", "reply", "mode"])
         self.assertEqual(d.state.freq_hz, 7_074_000)
         self.assertEqual(d.state.mode_label, "USB-D")
         self.assertEqual(d.state.filter, 1)

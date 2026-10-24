@@ -221,6 +221,36 @@ class TestPtt(_TxBase):
         spec = np.abs(np.fft.rfft(y[:48000]))
         self.assertAlmostEqual(np.argmax(spec) * 48000 / len(y[:48000]), 700, delta=3)
 
+    def test_stale_reply_cannot_enable_ptt(self):
+        """Regression: a poll reply in flight when DATA is switched off used to
+        flip the app's state back to DATA for a moment, and PTT keyed in USB."""
+        self._ready_for_tx()
+        from icomremote import civ as C
+        for _ in range(20):
+            self.session.set_mode("USB", True)
+            self.assertTrue(wait_for(lambda: self.radio.data and self.session.rig.data))
+            # a poll goes out, then DATA is turned off before its answer comes back
+            self.session._loop.call_soon_threadsafe(self.session._tx_civ, C.read_data_mode(0xB6))
+            self.session.set_mode("USB", False)
+            for _ in range(10):
+                try:
+                    self.session.set_ptt(True)
+                except PttRefused:
+                    pass
+                time.sleep(0.005)
+        time.sleep(0.5)
+        self.assertFalse(any(on for _, on in self.radio.ptt_log), "radio was keyed in plain USB")
+
+    def test_radio_confirms_data_before_keying(self):
+        self._ready_for_tx()
+        self.radio.data = False          # changed on the radio; the app hasn't polled yet
+        self.session.set_ptt(True)       # the app still believes USB-D, so this is accepted ...
+        self.assertTrue(wait_for(lambda: any("PTT refused: the radio reports USB" in t
+                                             for t in self.statuses())))
+        time.sleep(0.2)
+        self.assertEqual(self.radio.ptt_log, [])     # ... but the radio was never keyed
+        self.assertFalse(self.session.ptt)
+
     def test_timeout(self):
         self._ready_for_tx()
         self.session.ptt_timeout = 0.5

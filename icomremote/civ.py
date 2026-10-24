@@ -168,6 +168,25 @@ class RigState:
         return if_width_hz(self.mode, self.if_width_index)
 
 
+# Which state fields each solicited read reply carries (used to fence out
+# replies to reads sent before a change; see RadioSession).
+READ_GROUPS = {"freq": ("freq_hz",), "mode": ("mode", "filter"), "data": ("data",),
+               "width": ("if_width_index",)}
+
+
+def read_group(f):
+    """If f is a read request for one of READ_GROUPS, return the group name."""
+    if len(f) == 6 and f[4] == 0x03:
+        return "freq"
+    if len(f) == 6 and f[4] == 0x04:
+        return "mode"
+    if len(f) == 7 and f[4] == 0x1A and f[5] == 0x06:
+        return "data"
+    if len(f) == 7 and f[4] == 0x1A and f[5] == 0x03:
+        return "width"
+    return None
+
+
 class CivDecoder:
     """Applies frames from the radio to a RigState.
 
@@ -204,23 +223,23 @@ class CivDecoder:
             return [("ack", False)]
         if cmd in (0x00, 0x03) and len(payload) >= 5:
             self.state = replace(st, freq_hz=decode_freq(payload))
-            return [("freq", self.state.freq_hz)]
+            return ([("reply", "freq")] if cmd == 0x03 else []) + [("freq", self.state.freq_hz)]
         if cmd in (0x01, 0x04) and len(payload) >= 1:
             mode = MODE_NAMES.get(payload[0], "0x%02X" % payload[0])
             filt = payload[1] if len(payload) > 1 else st.filter
             width = st.if_width_index if (mode, filt) == (st.mode, st.filter) else -1
             self.state = replace(st, mode=mode, filter=filt, if_width_index=width)
-            return [("mode", self.state)]
+            return ([("reply", "mode")] if cmd == 0x04 else []) + [("mode", self.state)]
         if cmd == 0x1A and payload[:1] == b"\x05" and len(payload) >= 4:
             return [("menu", (bytes(payload[1:3]), bytes(payload[3:])))]
         if cmd == 0x1A and payload[:1] == b"\x03" and len(payload) >= 2:
             self.state = replace(st, if_width_index=bcd_value(payload[1]))
-            return [("mode", self.state)]
+            return [("reply", "width"), ("mode", self.state)]
         if cmd == 0x1A and payload[:1] == b"\x06" and len(payload) >= 2:
             data = payload[1] != 0
             filt = payload[2] if data and len(payload) > 2 else st.filter
             self.state = replace(st, data=data, filter=filt)
-            return [("mode", self.state)]
+            return [("reply", "data"), ("mode", self.state)]
         if cmd == 0x15 and len(payload) >= 3:
             return [({0x02: "smeter", 0x11: "po", 0x12: "swr"}.get(payload[0], "meter_%02x" % payload[0]),
                      decode_level(payload[1:3]))]

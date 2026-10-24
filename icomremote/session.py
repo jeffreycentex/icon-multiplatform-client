@@ -46,6 +46,7 @@ SLOW_RETRY_DELAY = 65.0     # the IC-705 drops audio if you re-login too often
 POLL_INTERVAL = 0.5
 STATS_INTERVAL = 1.0
 DEFAULT_PTT_TIMEOUT = 180.0
+FENCE_SECONDS = 1.5
 CIV_ANSWER_TIMEOUT = 1.0
 
 
@@ -99,6 +100,12 @@ class RadioSession:
         self._sinks = {}
         self._connected_at = None
         self._civ_waiters = []
+        # Stale-reply fences: reads sent / replies received per group, and per
+        # group (target reply count, deadline) after a change made by the app.
+        self._reads_sent = dict.fromkeys(civ.READ_GROUPS, 0)
+        self._replies = dict.fromkeys(civ.READ_GROUPS, 0)
+        self._fence = {}
+        self._keying = False             # key-down requested, waiting for the DATA check
         # transmit
         self.ptt = False                 # what we commanded
         self.tx = False                  # what the radio reports (1C 00)
@@ -249,7 +256,7 @@ class RadioSession:
 
             for f in (civ.read_freq(addr), civ.read_mode(addr), civ.read_data_mode(addr),
                       civ.read_if_width(addr), civ.read_ptt(addr)):
-                serial.send_civ(f)
+                self._tx_civ(f)
             await self._setup_data_mod(info.radio_name, spec.host)
             self._open_tx_source()
             tasks.append(loop.create_task(self._poll_loop(addr)))
@@ -330,14 +337,14 @@ class RadioSession:
                 s = self._serial
                 if s is None:
                     return
-                s.send_civ(civ.read_smeter(addr))
+                self._tx_civ(civ.read_smeter(addr))
                 n += 1
                 if n % 4 == 0:            # the radio also pushes changes (CI-V transceive)
-                    s.send_civ(civ.read_freq(addr))
-                    s.send_civ(civ.read_mode(addr))
-                    s.send_civ(civ.read_data_mode(addr))
+                    self._tx_civ(civ.read_freq(addr))
+                    self._tx_civ(civ.read_mode(addr))
+                    self._tx_civ(civ.read_data_mode(addr))
                     if self.rig.mode != "FM":
-                        s.send_civ(civ.read_if_width(addr))
+                        self._tx_civ(civ.read_if_width(addr))
                 rtt = self._control.rtt if self._control else 0.0
                 for st in (self._serial, self._audio):
                     if st is not None:
@@ -385,15 +392,19 @@ class RadioSession:
             for match, fut in list(self._civ_waiters):
                 if not fut.done() and match(kind, value):
                     fut.set_result((kind, value))
-            if kind in ("freq", "mode"):
+            if kind == "reply":
+                self._replies[value] += 1
+            elif kind in ("freq", "mode"):
+                st = self._fenced_state(dec.state)
                 with self._rig_lock:
-                    changed = dec.state != self.rig
-                    self.rig = dec.state
+                    changed = st != self.rig
+                    self.rig = st
                 if changed:
-                    self._emit("rig", dec.state)
-                if self._keyed and dec.state.mode and not dec.state.data:
+                    self._emit("rig", st)
+                # (a key-down still waiting for its check is refused by _key_after_check)
+                if self._keyed and st.mode and not st.data:
                     self._ptt_apply(False, reason="Unkeyed: the radio left DATA mode (now %s)"
-                                    % dec.state.mode_label)
+                                    % st.mode_label)
             elif kind == "ptt":
                 tx = value != 0
                 if tx != self.tx:
@@ -407,6 +418,25 @@ class RadioSession:
             elif kind == "ack" and not value:
                 log.info("radio answered NG to a CI-V command")
 
+    def _tx_civ(self, frame):
+        """Loop thread: send a CI-V frame, counting reads per group."""
+        if self._serial is None or self._serial.closed:
+            return
+        g = civ.read_group(frame)
+        if g is not None:
+            self._reads_sent[g] += 1
+        self._serial.send_civ(frame)
+
+    def _fenced_state(self, st):
+        """Replace fields whose fence is up with the app's own (newer) values."""
+        now = time.monotonic()
+        for g, (target, deadline) in list(self._fence.items()):
+            if self._replies[g] >= target or now >= deadline:
+                del self._fence[g]
+                continue
+            st = replace(st, **{f: getattr(self.rig, f) for f in civ.READ_GROUPS[g]})
+        return st
+
     async def _civ_ask(self, frame, match, timeout=CIV_ANSWER_TIMEOUT, attempts=2):
         """Send a CI-V frame and wait for the first decoded event match(kind, value)
         accepts. Returns (kind, value) or None. Loop thread only."""
@@ -417,7 +447,7 @@ class RadioSession:
             entry = (match, fut)
             self._civ_waiters.append(entry)
             try:
-                self._serial.send_civ(frame)
+                self._tx_civ(frame)
                 return await asyncio.wait_for(fut, timeout)
             except asyncio.TimeoutError:
                 continue
@@ -446,8 +476,7 @@ class RadioSession:
             return False
 
         def _send():
-            if self._serial is not None:
-                self._serial.send_civ(frame)
+            self._tx_civ(frame)
         loop.call_soon_threadsafe(_send)
         return True
 
@@ -468,7 +497,12 @@ class RadioSession:
                 self._decoder.state = new_state
             if self._serial is not None:
                 for f in frames:
-                    self._serial.send_civ(f)
+                    self._tx_civ(f)
+                deadline = time.monotonic() + FENCE_SECONDS
+                for f in frames:
+                    g = civ.read_group(f)
+                    if g is not None:            # ignore replies to reads sent before this change
+                        self._fence[g] = (self._reads_sent[g], deadline)
         self._loop.call_soon_threadsafe(_send)
         return new_state
 
@@ -543,41 +577,57 @@ class RadioSession:
             self.set_ptt(False, reason="Unkeyed: the rigctl client that keyed PTT disconnected")
 
     def _ptt_apply(self, on, owner=None, reason=None):
-        """Loop thread (or teardown). Sends the CI-V commands and starts/stops TX audio."""
-        a = self.civ_address
+        """Loop thread (or teardown). Key-down asks the radio for its DATA mode
+        first and keys only if the radio itself confirms DATA is on."""
         if on:
             self._ptt_owner = owner
             if self._ptt_timer is not None:
                 self._ptt_timer.cancel()
             self._ptt_timer = self._loop.call_later(self.ptt_timeout, self._ptt_timed_out)
-            if self._keyed:
+            if self._keyed or self._keying:
                 return
-            self._keyed = True
-            if self._tx_source is not None:
-                self._tx_source.start()
-            if self._serial is not None:
-                self._serial.send_civ(civ.set_ptt(a, True))
-                self._serial.send_civ(civ.read_ptt(a))
-            log.info("PTT on")
-            self._emit("ptt", True)
+            self._keying = True
+            self._loop.create_task(self._key_after_check())
             return
         if self._ptt_timer is not None:
             self._ptt_timer.cancel()
             self._ptt_timer = None
         self._ptt_owner = None
         self.ptt = False
+        self._keying = False                 # cancels a key-down still waiting for its check
         if not self._keyed:
             return
         self._keyed = False
-        if self._serial is not None and not self._serial.closed:
-            self._serial.send_civ(civ.set_ptt(a, False))
-            self._serial.send_civ(civ.read_ptt(a))
+        self._tx_civ(civ.set_ptt(self.civ_address, False))
+        self._tx_civ(civ.read_ptt(self.civ_address))
         if self._tx_source is not None:
             self._tx_source.stop()
         log.info("PTT off")
         self._emit("ptt", False)
         if reason:
             self._status(reason, "error")
+
+    async def _key_after_check(self):
+        a = self.civ_address
+        r = await self._civ_ask(civ.read_data_mode(a), lambda k, v: k == "reply" and v == "data")
+        if not self._keying:                 # unkeyed or disconnected meanwhile
+            return
+        self._keying = False
+        dec = self._decoder
+        if r is None or dec is None or not dec.state.data:
+            why = ("the radio did not confirm its DATA mode" if r is None or dec is None
+                   else "the radio reports %s, not a DATA mode" % dec.state.mode_label)
+            self._ptt_apply(False)
+            self._emit("ptt", False)
+            self._status("PTT refused: " + why, "error")
+            return
+        self._keyed = True
+        if self._tx_source is not None:
+            self._tx_source.start()
+        self._tx_civ(civ.set_ptt(a, True))
+        self._tx_civ(civ.read_ptt(a))
+        log.info("PTT on")
+        self._emit("ptt", True)
 
     def _ptt_timed_out(self):
         self._ptt_timer = None
