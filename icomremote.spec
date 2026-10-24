@@ -7,7 +7,7 @@ try:
     import samplerate  # noqa: F401
     hidden.append("samplerate")
 except ImportError:
-    print("NOTE: optional package 'samplerate' not installed; build will use linear resampling")
+    pass                                       # optional: linear resampling is used without it
 
 a = Analysis(["run_icomremote.py"], pathex=["."], hiddenimports=hidden,
              excludes=["tkinter"], noarchive=False)

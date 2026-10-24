@@ -4,6 +4,8 @@ numpy>=1.24
 sounddevice>=0.4.6        # PortAudio wheels included on Windows/macOS; Linux needs libportaudio2
 
 # Recommended
-samplerate>=0.2.1         # libsamplerate: high-quality resampling to the sound card rate
-                          # (Windows: remove this line if pip tries to compile it)
 av>=12.0                  # PyAV (bundled FFmpeg): only for M4A/MP4 recording
+
+# Optional, not installed by default: `pip install samplerate` (libsamplerate)
+# for higher-quality resampling. Without it a linear interpolator is used,
+# which is inaudible when the sound device runs at 48 kHz like the radio.

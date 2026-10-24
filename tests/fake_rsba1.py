@@ -98,7 +98,8 @@ class _Port(asyncio.DatagramProtocol):
 class FakeRadio:
     def __init__(self, user="beer", password="beerbeer", name="IC-7300MK2", civ_address=0xB6,
                  freq_hz=14_074_000, mode=0x01, data=True, filt=1, drop_audio=(), send_audio=True,
-                 in_use_by=None, data_mod=0x01, data_off_mod=0x00, lan_mod_level=128, menu_ng=False):
+                 in_use_by=None, data_mod=0x01, data_off_mod=0x00, lan_mod_level=128, menu_ng=False,
+                 tune_seconds=0.6, tune_result=0x01, swr_raw=48):
         self.user, self.password = user, password
         self.name = name
         self.civ_address = civ_address
@@ -111,6 +112,15 @@ class FakeRadio:
         self.menu_writes = []
         self.ptt = False
         self.ptt_log = []                    # (time, on)
+        self.rf_power = 128                  # 0..255
+        self.rf_power_writes = []
+        self.tuner = 0x01
+        self.tune_seconds = tune_seconds
+        self.tune_result = tune_result       # tuner state after a tune cycle (1 = matched, 0 = failed)
+        self.tune_started = []
+        self.tune_aborted = 0
+        self._tune_end = None
+        self.swr_raw = swr_raw
         self.tx_audio_while_ptt = 0
         self.tx_audio_while_rx = 0
         self.events = []
@@ -296,6 +306,33 @@ class FakeRadio:
                 return echo + [mk(civ.NG)]
             idx = {1: 34, 2: 28, 3: 22}[self.filt] if self.mode != 0x02 else {1: 44, 2: 29, 3: 14}[self.filt]
             return echo + [mk(0x1A, 0x03, bytes([civ.bcd_byte(idx)]))]
+        if cmd == 0x1C and payload[:1] == b"\x01":
+            if self._tune_end is not None and time.monotonic() >= self._tune_end:
+                self.tuner, self._tune_end = self.tune_result, None
+            if len(payload) == 1:
+                return echo + [mk(0x1C, 0x01, bytes([self.tuner]))]
+            v = payload[1]
+            if v == 0x02:
+                self.tuner, self._tune_end = 0x02, time.monotonic() + self.tune_seconds
+                self.tune_started.append(time.monotonic())
+            else:
+                if self.tuner == 0x02:
+                    self.tune_aborted += 1
+                self.tuner, self._tune_end = v, None
+            return echo + [mk(civ.OK)]
+        if cmd == 0x14 and payload[:1] == b"\x0a":
+            if len(payload) == 1:
+                return echo + [mk(0x14, 0x0A, civ.encode_level(self.rf_power))]
+            self.rf_power = civ.decode_level(payload[1:3])
+            self.rf_power_writes.append(self.rf_power)
+            return echo + [mk(civ.OK)]
+        if cmd == 0x15 and payload[:1] in (b"\x11", b"\x12"):
+            on_air = self.ptt or self.tuner == 0x02
+            if payload[:1] == b"\x11":
+                v = int(213 * self.rf_power / 255) if on_air else 0
+            else:
+                v = self.swr_raw if on_air else 0
+            return echo + [mk(0x15, payload[0], civ.encode_level(v))]
         if cmd == 0x1C and payload[:1] == b"\x00":
             if len(payload) == 1:
                 return echo + [mk(0x1C, 0x00, b"\x01" if self.ptt else b"\x00")]

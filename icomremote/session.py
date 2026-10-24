@@ -43,7 +43,9 @@ SAMPLE_RATE = 48000
 FAST_RETRIES = 5
 FAST_RETRY_DELAY = 1.0
 SLOW_RETRY_DELAY = 65.0     # the IC-705 drops audio if you re-login too often
-POLL_INTERVAL = 0.5
+POLL_INTERVAL = 0.25                # TX meters every tick, S-meter every 2nd, state every 8th
+TUNE_TIMEOUT = 30.0
+RF_POWER_HOLD = 1.5
 STATS_INTERVAL = 1.0
 DEFAULT_PTT_TIMEOUT = 180.0
 # Menu settings the app switches to LAN while connected: key -> (label, item table)
@@ -115,6 +117,15 @@ class RadioSession:
         # clear a newer press (or a stale press re-key after a release).
         self._ptt_lock = threading.RLock()
         self._ptt_seq = 0
+        # RF power and tuner
+        self.rf_power = None             # 0..255 as the radio reports it
+        self._rf_hold_until = 0.0        # ignore reports briefly after a change from the app
+        self.tuner = None                # 0 off, 1 on, 2 tuning
+        self._tuning = False             # a TUNE started from the app is running
+        self._tune_timer = None
+        self._tuner_reads = 0            # 1C 01 reads sent / answers received, to ignore
+        self._tuner_replies = 0          # answers to reads sent before a tune started
+        self._tune_fence = 0
         # transmit
         self.ptt = False                 # what we commanded
         self.tx = False                  # what the radio reports (1C 00)
@@ -266,7 +277,8 @@ class RadioSession:
             self._status("Connected to %s (%s, CI-V %02Xh)" % (spec.label(), info.radio_name, addr))
 
             for f in (civ.read_freq(addr), civ.read_mode(addr), civ.read_data_mode(addr),
-                      civ.read_if_width(addr), civ.read_ptt(addr)):
+                      civ.read_if_width(addr), civ.read_ptt(addr), civ.read_rf_power(addr),
+                      civ.read_tuner(addr)):
                 self._tx_civ(f)
             await self._setup_mods(info.radio_name, spec.host)
             self._open_tx_sources()
@@ -290,6 +302,7 @@ class RadioSession:
             # Unkey and put radio settings back while the serial stream may still work.
             if serial is not None and not serial.closed:
                 try:
+                    self._stop_tune()
                     self._unkey()
                     await self._restore_data_mod()
                 except Exception:
@@ -348,14 +361,23 @@ class RadioSession:
                 s = self._serial
                 if s is None:
                     return
-                self._tx_civ(civ.read_smeter(addr))
                 n += 1
-                if n % 4 == 0:            # the radio also pushes changes (CI-V transceive)
+                if self.tx or self._keyed or self._tuning:
+                    self._tx_civ(civ.read_po(addr))
+                    self._tx_civ(civ.read_swr(addr))
+                elif n % 2 == 0:
+                    self._tx_civ(civ.read_smeter(addr))
+                if self._tuning:
+                    self._tx_civ(civ.read_tuner(addr))
+                if n % 8 == 0:            # the radio also pushes changes (CI-V transceive)
                     self._tx_civ(civ.read_freq(addr))
                     self._tx_civ(civ.read_mode(addr))
                     self._tx_civ(civ.read_data_mode(addr))
                     if self.rig.mode != "FM":
                         self._tx_civ(civ.read_if_width(addr))
+                    self._tx_civ(civ.read_rf_power(addr))
+                    if not self._tuning:
+                        self._tx_civ(civ.read_tuner(addr))
                 rtt = self._control.rtt if self._control else 0.0
                 for st in (self._serial, self._audio):
                     if st is not None:
@@ -423,9 +445,15 @@ class RadioSession:
                 if tx != self.tx:
                     self.tx = tx
                     self._emit("tx", tx)
-            elif kind in ("smeter", "po", "swr", "rfpower"):
+            elif kind in ("smeter", "po", "swr"):
                 self.meters[kind] = value
                 self._emit("meter", (kind, value))
+            elif kind == "rfpower":
+                if time.monotonic() >= self._rf_hold_until and value != self.rf_power:
+                    self.rf_power = value
+                    self._emit("rf_power", value)
+            elif kind == "tuner":
+                self._on_tuner(value)
             elif kind == "foreign":
                 log.debug("CI-V frame from unexpected address %02Xh", value)
             elif kind == "ack" and not value:
@@ -438,6 +466,8 @@ class RadioSession:
         g = civ.read_group(frame)
         if g is not None:
             self._reads_sent[g] += 1
+        elif len(frame) == 7 and frame[4] == 0x1C and frame[5] == 0x01:
+            self._tuner_reads += 1
         self._serial.send_civ(frame)
 
     def _fenced_state(self, st):
@@ -606,6 +636,8 @@ class RadioSession:
             return "not connected to the radio"
         if not self.rig.mode:
             return "the radio's mode is not known yet"
+        if self._tuning or self.tuner == civ.TUNER_TUNING:
+            return "the antenna tuner is tuning"
         return self._rule_violation(self.rig.data, self.rig.mode, voice_ok)
 
     def set_ptt(self, on, owner=None, reason=None, voice_ok=False):
@@ -707,6 +739,74 @@ class RadioSession:
     def _ptt_timed_out(self):
         self._ptt_timer = None
         self._unkey(reason="Unkeyed: PTT timeout (%.0f s)" % self.ptt_timeout)
+
+    # ------------------------------------------------------------------ RF power and tuner
+    def set_rf_power(self, percent):
+        """Thread-safe: RF power 0-100 %."""
+        if not self._connected:
+            raise NotConnected("not connected to the radio")
+        level = int(round(max(0.0, min(100.0, float(percent))) * 255 / 100))
+        self.rf_power = level
+        self._rf_hold_until = time.monotonic() + RF_POWER_HOLD
+        a = self.civ_address
+
+        def _send():
+            self._tx_civ(civ.set_rf_power(a, level))
+            self._tx_civ(civ.read_rf_power(a))
+        self._loop.call_soon_threadsafe(_send)
+        return level
+
+    def tune(self):
+        """Thread-safe: run the internal antenna tuner's tune cycle (like the TUNER button)."""
+        if not self._connected:
+            raise NotConnected("not connected to the radio")
+        if self.ptt or self._keyed:
+            raise PttRefused("TUNE refused: transmitting")
+        if self._tuning:
+            return
+        self._tuning = True
+        self._loop.call_soon_threadsafe(self._start_tune)
+
+    def _start_tune(self):
+        if self._tune_timer is not None:
+            self._tune_timer.cancel()
+        self._tune_timer = self._loop.call_later(TUNE_TIMEOUT, self._tune_timed_out)
+        self._tune_fence = self._tuner_reads         # answers to earlier reads don't count
+        self._tx_civ(civ.set_tuner(self.civ_address, civ.TUNER_TUNING))
+        self._emit("tuning", True)
+        self._status("Tuning …")
+
+    def _on_tuner(self, value):
+        self._tuner_replies += 1
+        if self._tuning and self._tuner_replies <= self._tune_fence:
+            return                               # stale: read was sent before the tune started
+        self.tuner = value
+        self._emit("tuner", value)
+        if self._tuning and value != civ.TUNER_TUNING:
+            # The radio answers 02 while tuning; anything else means the cycle ended.
+            self._end_tune("Tune finished: tuner %s" % ("on" if value == civ.TUNER_ON else "off"),
+                           "info" if value == civ.TUNER_ON else "error")
+
+    def _tune_timed_out(self):
+        self._tune_timer = None
+        self._tx_civ(civ.set_tuner(self.civ_address, civ.TUNER_ON))      # stops the cycle
+        self._end_tune("Tune stopped after %.0f s" % TUNE_TIMEOUT, "error")
+
+    def _stop_tune(self):
+        """Disconnect/teardown: abort a running tune cycle."""
+        if self._tuning:
+            self._tx_civ(civ.set_tuner(self.civ_address, civ.TUNER_ON))
+            self._end_tune("Tune stopped: disconnecting", "error")
+
+    def _end_tune(self, text, level):
+        if self._tune_timer is not None:
+            self._tune_timer.cancel()
+            self._tune_timer = None
+        if not self._tuning:
+            return
+        self._tuning = False
+        self._emit("tuning", False)
+        self._status(text, level)
 
     # ------------------------------------------------------------------ TX audio
     def set_tx_device(self, device_key, gain=1.0, kind="data"):

@@ -113,8 +113,19 @@ class TestGui(unittest.TestCase):
         w.ptt_btn.click()
         self.assertTrue(self.pump_until(lambda: self.radio.ptt and w.tx_indicator.text() == "TX"))
         self.assertTrue(self.pump_until(lambda: w.tx_level.value() > 0))
+        self.assertTrue(self.pump_until(lambda: "SWR 1.5" in w.smeter.format()))     # Po/SWR on TX
         w.ptt_btn.click()
         self.assertTrue(self.pump_until(lambda: not self.radio.ptt and w.tx_indicator.text() == "RX"))
+        self.assertTrue(self.pump_until(lambda: w.smeter.format().startswith("S")))   # back to S-meter
+
+        # ---- RF power and TUNE
+        self.assertTrue(self.pump_until(lambda: w.rf_power_label.text() == "50 %"))  # 128/255 from the radio
+        w.rf_power.setValue(25)
+        self.assertTrue(self.pump_until(lambda: self.radio.rf_power == 64))
+        w.tune_btn.click()
+        self.assertTrue(self.pump_until(lambda: self.radio.tuner == 2 and "tuning" in w.tuner_label.text()))
+        self.assertFalse(w.tune_btn.isEnabled())
+        self.assertTrue(self.pump_until(lambda: w.tuner_label.text() == "Tuner: on" and w.tune_btn.isEnabled()))
 
         w._connect_clicked()                                # Disconnect
         self.assertTrue(self.pump_until(lambda: not w.freq.isEnabled()

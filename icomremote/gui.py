@@ -26,6 +26,7 @@ log = logging.getLogger(__name__)
 
 STEPS_HZ = [10, 100, 500, 1000, 5000, 9000, 10000, 100000]
 S_MAX_RAW = 241          # S9+60 dB
+SWR_WARN = 2.5
 
 
 class _Bridge(QObject):
@@ -46,6 +47,8 @@ class MainWindow(QMainWindow):
         self._rec_started = None
         self._space_owner = object()     # identifies space-bar keying to the session
         self._space_down = False
+        self._on_air = False             # radio transmitting or tuning: meter shows Po/SWR
+        self._po = self._swr = None
 
         central = QWidget()
         root = QVBoxLayout(central)
@@ -121,7 +124,7 @@ class MainWindow(QMainWindow):
         g.addWidget(self.remember_pw, 2, 2, 1, 2)
         g.addWidget(self.conn_label, 3, 0, 1, 4)
         g.addWidget(self.info_label, 4, 0, 1, 4)
-        g.addWidget(QLabel("S-meter"), 5, 0)
+        g.addWidget(QLabel("Meter"), 5, 0)
         g.addWidget(self.smeter, 5, 1, 1, 3)
         g.setColumnStretch(1, 1)
         return box
@@ -282,6 +285,18 @@ class MainWindow(QMainWindow):
                                   "transmitting. Off at every start and disconnect.")
         self.voice_arm.toggled.connect(self._voice_arm_toggled)
         self._style_arm(False)
+        self.rf_power = QSlider(Qt.Horizontal, minimum=0, maximum=100, value=50)
+        self.rf_power.setTracking(False)          # send when released, not on every step
+        self.rf_power.setToolTip("RF power (the radio's RF POWER setting)")
+        self.rf_power.valueChanged.connect(self._rf_power_changed)
+        self.rf_power.sliderMoved.connect(lambda v: self.rf_power_label.setText("%d %%" % v))
+        self.rf_power_label = QLabel("—")
+        self.rf_power_label.setMinimumWidth(40)
+        self.tune_btn = QPushButton("TUNE")
+        self.tune_btn.setToolTip("Run the internal antenna tuner's tune cycle (like the radio's TUNER\n"
+                                 "button). Transmits a carrier; stopped after 30 s or on disconnect.")
+        self.tune_btn.clicked.connect(self._tune_clicked)
+        self.tuner_label = QLabel("Tuner: —")
         self.ptt_timeout = QSpinBox(minimum=10, maximum=600, value=180, suffix=" s")
         self.ptt_timeout.setToolTip("Transmit is cut off after this long, whatever keyed it")
         self.ptt_timeout.valueChanged.connect(lambda v: setattr(self.radio, "ptt_timeout", float(v)))
@@ -317,11 +332,19 @@ class MainWindow(QMainWindow):
         row.addWidget(self.voice_arm)
         row.addStretch(1)
         g.addLayout(row, 4, 0, 1, 5)
+        prow = QHBoxLayout()
+        prow.addWidget(QLabel("Power"))
+        prow.addWidget(self.rf_power, 1)
+        prow.addWidget(self.rf_power_label)
+        prow.addSpacing(12)
+        prow.addWidget(self.tune_btn)
+        prow.addWidget(self.tuner_label)
+        g.addLayout(prow, 5, 0, 1, 5)
         trow = QHBoxLayout()
         trow.addWidget(QLabel("PTT timeout"))
         trow.addWidget(self.ptt_timeout)
         trow.addStretch(1)
-        g.addLayout(trow, 5, 0, 1, 5)
+        g.addLayout(trow, 6, 0, 1, 5)
         if sys.platform.startswith("linux") and shutil.which("pactl"):
             mk = QPushButton("Create 'IcomTX' virtual sink")
             mk.setToolTip("pactl load-module module-null-sink sink_name=IcomTX\n"
@@ -333,9 +356,9 @@ class MainWindow(QMainWindow):
         mods.addWidget(self.manage_data_mod)
         mods.addWidget(self.manage_data_off_mod)
         mods.addStretch(1)
-        g.addLayout(mods, 6, 0, 1, 5)
-        g.addWidget(self.data_mod_label, 7, 0, 1, 4)
-        g.addWidget(self.restore_btn, 7, 4)
+        g.addLayout(mods, 7, 0, 1, 5)
+        g.addWidget(self.data_mod_label, 8, 0, 1, 4)
+        g.addWidget(self.restore_btn, 8, 4)
         g.setColumnStretch(1, 1)
         return box
 
@@ -453,7 +476,7 @@ class MainWindow(QMainWindow):
         self.connect_btn.setText("Disconnect")
 
     def _set_controls_enabled(self, on):
-        for w in (self.freq, self.data_btn, self.ptt_btn, self.voice_arm,
+        for w in (self.freq, self.data_btn, self.ptt_btn, self.voice_arm, self.rf_power, self.tune_btn,
                   *self.mode_buttons.values(), *self.filter_buttons.values()):
             w.setEnabled(on)
         if not on:
@@ -695,6 +718,49 @@ class MainWindow(QMainWindow):
         self.data_mod_label.setText("\n".join(lines))
 
     # ================================================================== voice
+    # ================================================================== power, tuner, meter
+    def _rf_power_changed(self, v):
+        self.rf_power_label.setText("%d %%" % v)
+        try:
+            self.radio.set_rf_power(v)
+        except NotConnected as e:
+            self.statusBar().showMessage(str(e), 5000)
+
+    def _tune_clicked(self, *_):
+        try:
+            self.radio.tune()
+        except (NotConnected, PttRefused) as e:
+            self.statusBar().showMessage(str(e), 8000)
+
+    def _show_tuner(self, value):
+        self.tuner_label.setText("Tuner: " + {0: "off", 1: "on", 2: "tuning …"}.get(value, "?"))
+
+    def _set_on_air(self, on):
+        if on == self._on_air:
+            return
+        self._on_air = on
+        self._po = self._swr = None
+        if on:
+            self.smeter.setRange(0, 100)
+            self.smeter.setValue(0)
+            self.smeter.setFormat("Po —")
+        else:
+            self.smeter.setRange(0, S_MAX_RAW)
+            self.smeter.setValue(0)
+            self.smeter.setFormat("—")
+            self.smeter.setStyleSheet("")
+
+    def _show_tx_meter(self):
+        po = civ.po_percent(self._po) if self._po is not None else None
+        swr = civ.swr(self._swr) if self._swr is not None else None
+        self.smeter.setValue(int(round(po)) if po is not None else 0)
+        text = "Po %s" % ("%.0f %%" % po if po is not None else "—")
+        if swr is not None:
+            text += "   SWR %.1f" % swr
+        self.smeter.setFormat(text)
+        high = swr is not None and swr >= SWR_WARN
+        self.smeter.setStyleSheet("QProgressBar::chunk { background: #c0392b; }" if high else "")
+
     def _style_arm(self, armed):
         self.voice_arm.setStyleSheet("background: #e67e22; color: white; font-weight: bold" if armed else "")
 
@@ -785,10 +851,26 @@ class MainWindow(QMainWindow):
             self._show_rig(payload)
         elif kind == "meter":
             name, raw = payload
-            if name == "smeter":
+            if name == "smeter" and not self._on_air:
                 db = civ.s_meter_db(raw)
                 self.smeter.setValue(min(raw, S_MAX_RAW))
                 self.smeter.setFormat(civ.s_meter_text(db))
+            elif name in ("po", "swr") and self._on_air:
+                setattr(self, "_" + name, raw)
+                self._show_tx_meter()
+        elif kind == "rf_power":
+            if not self.rf_power.isSliderDown():
+                self.rf_power.blockSignals(True)
+                self.rf_power.setValue(int(round(payload * 100 / 255)))
+                self.rf_power.blockSignals(False)
+                self.rf_power_label.setText("%d %%" % self.rf_power.value())
+        elif kind == "tuner":
+            self._show_tuner(payload)
+        elif kind == "tuning":
+            self.tune_btn.setEnabled(not payload and self.radio.connected)
+            self._set_on_air(payload or self.radio.tx)
+            if payload:
+                self._show_tuner(2)
         elif kind == "status":
             text, level = payload
             self.conn_label.setText(text)
@@ -809,6 +891,9 @@ class MainWindow(QMainWindow):
                 self.smeter.setFormat("—")
                 self.ptt_btn.setChecked(False)
                 self._style_tx(False)
+                self._set_on_air(False)
+                self.rf_power_label.setText("—")
+                self.tuner_label.setText("Tuner: —")
                 self.restore_btn.setEnabled(False)
                 self._show_pending_restores()
                 if not self.radio.running:
@@ -841,6 +926,7 @@ class MainWindow(QMainWindow):
             self.ptt_btn.setChecked(payload)
         elif kind == "tx":
             self._style_tx(payload)
+            self._set_on_air(payload or self.radio._tuning)
         elif kind == "data_mod":
             self._show_data_mod(payload)
         elif kind == "tx_source_failed":

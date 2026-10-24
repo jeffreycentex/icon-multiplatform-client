@@ -21,8 +21,8 @@ IC-7300MK2 ◄udp─┤ session thread (asyncio): control / serial / audio  │
 |---|---|---|
 | 1 | Login, UDP streams, RX audio, CI-V read | done, verified on an IC-7300MK2 |
 | 2 | GUI, frequency/mode/filter control, S-meter, rigctld | done, verified on an IC-7300MK2 |
-| 3 | TX audio, PTT with safety rules, DATA MOD switch and restore | **this release** |
-| 4 | Po/SWR on TX, RF power, TUNE | |
+| 3 | TX audio (data and voice), PTT with safety rules, DATA MOD / DATA OFF MOD switch and restore, recording | done, verified on an IC-7300MK2 |
+| 4 | Po/SWR on TX, RF power, TUNE | **this release** |
 | 5 | Power ON/OFF | |
 | 6 | PyInstaller builds | |
 
@@ -39,8 +39,10 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-- Windows: if `pip` fails building `samplerate`, delete that line from
-  `requirements.txt`; the app falls back to linear-interpolation resampling.
+- Optional: `pip install samplerate` for libsamplerate resampling. Not needed:
+  the radio sends 48 kHz and most sound devices run at 48 kHz, so the default
+  linear interpolator only trims for clock drift and is inaudible. (On
+  Windows it may need a compiler, which is why it isn't in the requirements.)
 - Linux: PortAudio is required: `sudo apt install libportaudio2` (Debian/Ubuntu)
   or `sudo dnf install portaudio` (Fedora).
 
@@ -72,7 +74,9 @@ Enter the radio's address, user name and password, and click **Connect**.
 - **Mode**: LSB, USB, AM, FM, plus **DATA** for the data variants (USB-D …).
 - **Filter**: FIL1/FIL2/FIL3, with the selected filter's passband shown next
   to them.
-- **S-meter**: updated twice a second.
+- **Meter**: the S-meter while receiving; **Po** (percent of full power) and
+  **SWR** while the radio transmits or tunes, updated four times a second. The
+  bar turns red at SWR 2.5 or higher.
 - **Receive audio output**: pick the virtual cable (or speakers) and tick
   *Play to*.
 
@@ -158,6 +162,15 @@ Transmit stops (PTT released) when:
 
 Audio is only sent to the radio while PTT is on. The **TX/RX** indicator shows
 what the radio reports, not just what was requested.
+
+### RF power and TUNE
+
+- **Power** sets the radio's RF POWER (0-100 %) when you release the slider;
+  changes made on the radio show up within a couple of seconds.
+- **TUNE** runs the internal antenna tuner's tune cycle, like the radio's
+  TUNER button. It transmits a carrier, so it is refused while PTT is on, and
+  PTT is refused while it runs. The cycle is stopped after 30 s or if you
+  disconnect; the result ("tuner on" or "tuner off") appears in the status.
 
 ### DATA MOD and DATA OFF MOD
 
@@ -272,6 +285,8 @@ IC-7300MK2. Covered:
 - DATA MOD: switch, restore, crash recovery from the record on disk, manual restore
 - audio continuity, with dropped packets recovered by retransmit; audio timeout
 - recording: WAV (and M4A when PyAV is installed), including starting before connecting
+- RF power read/set, Po/SWR polled only while transmitting, TUNE cycle (success, failure,
+  30 s timeout, abort on disconnect, refusals both ways)
 - the GUI, run offscreen against the fake radio (needs PySide6; skipped otherwise)
 
 ## Licensing

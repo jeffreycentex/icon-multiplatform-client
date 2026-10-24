@@ -320,3 +320,34 @@ LAN_MOD_LEVEL_ITEM = {
 }
 DATA_MOD_LAN = 0x05
 DATA_MOD_NAMES = {0x00: "MIC", 0x01: "USB", 0x02: "ACC", 0x03: "MIC+USB", 0x04: "MIC+ACC", 0x05: "LAN"}
+
+
+# ---------------------------------------------------------------- RF power, TX meters, tuner
+
+def read_rf_power(addr):
+    return frame(addr, 0x14, 0x0A)
+
+
+def set_rf_power(addr, level):
+    """level 0..255 (0 % .. 100 %)."""
+    return frame(addr, 0x14, 0x0A, encode_level(level))
+
+
+def read_po(addr):
+    return frame(addr, 0x15, 0x11)
+
+
+def read_swr(addr):
+    return frame(addr, 0x15, 0x12)
+
+
+TUNER_OFF, TUNER_ON, TUNER_TUNING = 0x00, 0x01, 0x02
+
+
+def read_tuner(addr):
+    return frame(addr, 0x1C, 0x01)
+
+
+def set_tuner(addr, value):
+    """0 = tuner off, 1 = tuner on (also stops a tune), 2 = start tuning."""
+    return frame(addr, 0x1C, 0x01, bytes([value]))
