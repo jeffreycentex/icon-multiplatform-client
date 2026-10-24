@@ -823,7 +823,11 @@ class RadioSession:
         return self._install_sink("card", sink)
 
     def start_recording(self, path):
-        return self._install_sink("file", make_file_sink(path))
+        """Record received audio (.wav, .m4a or .mp4). Waits for audio if not connected."""
+        ok = self._install_sink("file", make_file_sink(path))
+        if ok:
+            self._emit("recording", {"active": True, "path": path})
+        return ok
 
     def stop_recording(self):
         with self._sink_lock:
@@ -831,7 +835,13 @@ class RadioSession:
         if sink is None:
             return None
         sink.close()
-        return {"path": sink.current_path or sink.path, "seconds": sink.seconds()}
+        info = {"active": False, "path": sink.current_path or sink.path, "seconds": sink.seconds()}
+        self._emit("recording", info)
+        return info
+
+    def recording_seconds(self):
+        sink = self._sinks.get("file")
+        return sink.seconds() if sink else None
 
     def audio_stats(self):
         sink = self._sinks.get("card")

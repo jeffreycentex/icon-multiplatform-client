@@ -84,6 +84,15 @@ class TestGui(unittest.TestCase):
         self.radio.push_freq(3_573_000)                     # VFO turned on the radio
         self.assertTrue(self.pump_until(lambda: w.freq.value() == 3573.0))
 
+        # ---- recording
+        w.rec_dir.setText(self.tmp)
+        w.rec_btn.click()
+        self.assertTrue(self.pump_until(lambda: w.rec_label.text().startswith("Recording")))
+        self.assertTrue(self.pump_until(lambda: (w.radio.recording_seconds() or 0) > 1.0))
+        w.rec_btn.click()
+        self.assertTrue(w.rec_label.text().startswith("Saved icom_"), w.rec_label.text())
+        self.assertTrue([f for f in os.listdir(self.tmp) if f.endswith(".wav")])
+
         # ---- transmit
         from test_tx import FakeSource
         self.assertTrue(self.pump_until(lambda: "LAN (was USB" in w.data_mod_label.text()))

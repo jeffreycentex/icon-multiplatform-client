@@ -6,3 +6,4 @@ sounddevice>=0.4.6        # PortAudio wheels included on Windows/macOS; Linux ne
 # Recommended
 samplerate>=0.2.1         # libsamplerate: high-quality resampling to the sound card rate
                           # (Windows: remove this line if pip tries to compile it)
+av>=12.0                  # PyAV (bundled FFmpeg): only for M4A/MP4 recording

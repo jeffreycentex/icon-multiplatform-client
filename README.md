@@ -79,6 +79,20 @@ Enter the radio's address, user name and password, and click **Connect**.
 The password is not saved unless you tick *Remember password*; it is then
 stored unencrypted in the app's settings on that computer.
 
+## Recording
+
+**Record received audio** saves what the radio receives (not your transmit
+audio) to the chosen folder:
+
+- **WAV**: 16-bit PCM at 48 kHz, as received from the radio.
+- **M4A / MP4**: AAC, 64 kbit/s, 48 kHz. Needs PyAV (`pip install av`, included
+  in `requirements.txt`); without it these formats are greyed out.
+
+File names carry the time (UTC), frequency and mode, e.g.
+`icom_20261024T180000Z_14074.000kHz_USB-D.wav`. Recording can be started before
+connecting; it waits for audio. A classic WAV file is limited to 4 GB, about
+12 hours at 48 kHz.
+
 ## Virtual audio cables
 
 You need **two** virtual cables, one per direction. If receive and transmit
@@ -225,6 +239,7 @@ IC-7300MK2. Covered:
 - transmit: framing/resampling, the PTT rules and every unkey trigger, audio sent only while keyed
 - DATA MOD: switch, restore, crash recovery from the record on disk, manual restore
 - audio continuity, with dropped packets recovered by retransmit; audio timeout
+- recording: WAV (and M4A when PyAV is installed), including starting before connecting
 - the GUI, run offscreen against the fake radio (needs PySide6; skipped otherwise)
 
 ## Licensing

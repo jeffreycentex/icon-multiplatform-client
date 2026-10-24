@@ -10,6 +10,7 @@ All sinks share this interface (called from the session thread):
 
 SoundCardSink   -> any output device (virtual cable, BlackHole, PulseAudio/PipeWire sink, speakers)
 WavSink         -> 16-bit PCM WAV at the radio's rate
+M4aSink         -> AAC in an MP4 container (.m4a / .mp4) via PyAV (optional dependency)
 """
 
 import collections
@@ -21,6 +22,7 @@ import sys
 import threading
 import time
 import wave
+from fractions import Fraction
 
 import numpy as np
 
@@ -36,6 +38,14 @@ except Exception as e:  # PortAudio missing on Linux raises OSError
     sd = None
     HAVE_SOUNDDEVICE = False
     _SD_ERROR = str(e)
+
+try:
+    import av
+    HAVE_PYAV = True
+except Exception:
+    av = None
+    HAVE_PYAV = False
+
 
 # --------------------------------------------------------------------------
 # Output-device enumeration
@@ -457,10 +467,86 @@ class WavSink:
             self._wav = None
 
 
+class M4aSink:
+    """AAC audio in an MP4 container (.m4a or .mp4). Requires PyAV."""
+
+    OUT_RATE = 48000
+    BITRATE = 64000
+
+    def __init__(self, path):
+        if not HAVE_PYAV:
+            raise RuntimeError("MP4/M4A recording needs PyAV: pip install av")
+        self.path = path
+        self._container = None
+        self._stream = None
+        self._resampler = None
+        self._in_rate = None
+        self._pts = 0
+        self._part = 0
+        self.frames = 0
+        self.current_path = None
+
+    def set_input_rate(self, rate):
+        rate = int(round(rate))
+        if self._container is not None and rate == self._in_rate:
+            return
+        if self._container is not None:
+            self._finish()
+            self._part += 1
+        self._in_rate = rate
+        self._pts = 0
+        self.current_path = _numbered(self.path, self._part)
+        self._container = av.open(self.current_path, mode="w", format="mp4")
+        self._stream = self._container.add_stream("aac", rate=self.OUT_RATE)
+        cc = self._stream.codec_context
+        try:
+            cc.layout = "mono"
+        except Exception:
+            pass
+        cc.bit_rate = self.BITRATE
+        self._resampler = av.AudioResampler(format="fltp", layout="mono", rate=self.OUT_RATE)
+        log.info("recording AAC/MP4 %s (%d Hz in, %d Hz out)", self.current_path, rate, self.OUT_RATE)
+
+    def write(self, samples):
+        if self._container is None:
+            return
+        arr = np.ascontiguousarray(samples.astype(np.int16, copy=False)).reshape(1, -1)
+        frame = av.AudioFrame.from_ndarray(arr, format="s16", layout="mono")
+        frame.sample_rate = self._in_rate
+        frame.pts = self._pts
+        frame.time_base = Fraction(1, self._in_rate)
+        self._pts += arr.shape[1]
+        self.frames += arr.shape[1]
+        for f in self._resampler.resample(frame):
+            for packet in self._stream.encode(f):
+                self._container.mux(packet)
+
+    def seconds(self):
+        return self.frames / self._in_rate if self._in_rate else 0.0
+
+    def _finish(self):
+        try:
+            for f in self._resampler.resample(None):
+                for packet in self._stream.encode(f):
+                    self._container.mux(packet)
+            for packet in self._stream.encode(None):
+                self._container.mux(packet)
+        finally:
+            self._container.close()
+            self._container = None
+
+    def close(self):
+        if self._container is not None:
+            self._finish()
+
+
 def make_file_sink(path):
-    if os.path.splitext(path)[1].lower() != ".wav":
-        raise ValueError("recordings are WAV only (use a .wav file name)")
-    return WavSink(path)
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".wav":
+        return WavSink(path)
+    if ext in (".m4a", ".mp4", ".aac"):
+        return M4aSink(path if ext != ".aac" else os.path.splitext(path)[0] + ".m4a")
+    raise ValueError("unsupported file type %r (use .wav, .m4a or .mp4)" % ext)
 
 
 def default_recording_name(freq_hz, mode, ext):

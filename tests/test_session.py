@@ -96,6 +96,40 @@ class TestSession(unittest.TestCase):
         self.assertAlmostEqual(np.argmax(spec_) * 48000 / 48000, 1000, delta=2)
         self.assertLess(np.max(np.abs(np.diff(x))), 8000 * 2 * np.pi * 1000 / 48000 * 1.05)
 
+    def test_record_started_before_connect(self):
+        spec = self._start()
+        wav = os.path.join(tempfile.mkdtemp(), "early.wav")
+        self.session.start_recording(wav)                       # waits for audio
+        self.assertEqual(self.session.recording_seconds(), 0.0)
+        self.session.connect(spec)
+        self.assertTrue(wait_for(lambda: (self.session.recording_seconds() or 0) > 1.0))
+        info = self.session.stop_recording()
+        self.assertFalse(info["active"])
+        with wave.open(wav) as w:
+            self.assertEqual((w.getframerate(), w.getnchannels(), w.getsampwidth()), (48000, 1, 2))
+            self.assertGreater(w.getnframes(), 48000)
+        self.assertEqual([p["active"] for p in self.events.kinds("recording")], [True, False])
+
+    def test_record_m4a(self):
+        from icomremote.sinks import HAVE_PYAV
+        if not HAVE_PYAV:
+            self.skipTest("PyAV not installed")
+        import av
+        spec = self._start()
+        path = os.path.join(tempfile.mkdtemp(), "rx.m4a")
+        self.session.start_recording(path)
+        self.session.connect(spec)
+        self.assertTrue(wait_for(lambda: (self.session.recording_seconds() or 0) > 1.5))
+        self.session.stop_recording()
+        with av.open(path) as c:
+            st = c.streams.audio[0]
+            self.assertEqual(st.codec_context.name, "aac")
+            self.assertGreater(float(c.duration or 0) / 1e6, 1.0)
+
+    def test_record_rejects_unknown_format(self):
+        with self.assertRaises(ValueError):
+            RadioSession().start_recording(os.path.join(tempfile.mkdtemp(), "x.flac"))
+
     def test_retransmit_recovers_dropped_audio(self):
         spec = self._start(drop_audio={20, 21, 35, 60})
         wav = os.path.join(tempfile.mkdtemp(), "rx.wav")

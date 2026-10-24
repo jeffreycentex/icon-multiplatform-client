@@ -1,21 +1,24 @@
 """PySide6 main window (layout and audio/rigctld boxes adapted from kiwisdr-remote)."""
 
 import logging
+import os
 import shutil
 import sys
+import time
 
 from PySide6.QtCore import QObject, QSettings, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton,
     QSlider, QSpinBox, QStatusBar, QVBoxLayout, QWidget)
 
 from . import __version__, civ
 from .rigctld import RigctldServer
 from .session import ConnectionSpec, NotConnected, PttRefused, RadioSession
-from .sinks import (HAVE_SOUNDDEVICE, PULSE_PREFIX, create_null_sink, guess_virtual_cable,
-                    list_output_devices, sounddevice_error)
+from .sinks import (HAVE_PYAV, HAVE_SOUNDDEVICE, PULSE_PREFIX, create_null_sink,
+                    default_recording_name, guess_virtual_cable, list_output_devices,
+                    sounddevice_error)
 from .state import BASE_MODES, FILTERS, PROFILES
 from .txaudio import guess_tx_cable, list_input_devices
 
@@ -40,12 +43,14 @@ class MainWindow(QMainWindow):
         self.radio = RadioSession(on_event=self.bridge.event.emit)
         self.rigctld = None
         self._editing_freq = False
+        self._rec_started = None
 
         central = QWidget()
         root = QVBoxLayout(central)
         root.addWidget(self._build_radio_box())
         root.addWidget(self._build_tune_box())
         root.addWidget(self._build_audio_box())
+        root.addWidget(self._build_record_box())
         root.addWidget(self._build_tx_box())
         root.addWidget(self._build_rigctl_box())
         root.addStretch(1)
@@ -202,6 +207,35 @@ class MainWindow(QMainWindow):
         g.setColumnStretch(1, 1)
         return box
 
+    def _build_record_box(self):
+        box = QGroupBox("Record received audio")
+        g = QGridLayout(box)
+        self.rec_format = QComboBox()
+        self.rec_format.addItem("WAV (16-bit PCM, 48 kHz)", ".wav")
+        self.rec_format.addItem("M4A (AAC in MP4 container)", ".m4a")
+        self.rec_format.addItem("MP4 (AAC, .mp4 extension)", ".mp4")
+        if not HAVE_PYAV:
+            for i in (1, 2):
+                item = self.rec_format.model().item(i)
+                item.setEnabled(False)
+                item.setToolTip("Install PyAV:  pip install av")
+        self.rec_dir = QLineEdit()
+        browse = QPushButton("Folder…")
+        browse.clicked.connect(self._choose_dir)
+        self.rec_btn = QPushButton("● Record")
+        self.rec_btn.setCheckable(True)
+        self.rec_btn.toggled.connect(self._record_toggled)
+        self.rec_label = QLabel("")
+        g.addWidget(QLabel("Format"), 0, 0)
+        g.addWidget(self.rec_format, 0, 1, 1, 2)
+        g.addWidget(QLabel("Folder"), 1, 0)
+        g.addWidget(self.rec_dir, 1, 1)
+        g.addWidget(browse, 1, 2)
+        g.addWidget(self.rec_btn, 2, 0)
+        g.addWidget(self.rec_label, 2, 1, 1, 2)
+        g.setColumnStretch(1, 1)
+        return box
+
     def _build_tx_box(self):
         box = QGroupBox("Transmit (data modes only)")
         g = QGridLayout(box)
@@ -312,6 +346,9 @@ class MainWindow(QMainWindow):
         self._step_changed()
         self._refresh_devices(select=s.value("audio_device", ""))
         self.volume.setValue(s.value("volume", 100, type=int))
+        i = self.rec_format.findData(s.value("rec_format", ".wav"))
+        self.rec_format.setCurrentIndex(i if i >= 0 and self.rec_format.model().item(i).isEnabled() else 0)
+        self.rec_dir.setText(s.value("rec_dir", os.path.join(os.path.expanduser("~"), "Music", "IcomRemote")))
         self._refresh_tx_devices(select=s.value("tx_device", ""))
         self.tx_gain.setValue(s.value("tx_gain", 100, type=int))
         self.ptt_timeout.setValue(s.value("ptt_timeout", 180, type=int))
@@ -347,6 +384,8 @@ class MainWindow(QMainWindow):
         s.setValue("audio_device", self.device_combo.currentData() or "")
         s.setValue("audio_enable", self.audio_enable.isChecked())
         s.setValue("volume", self.volume.value())
+        s.setValue("rec_format", self.rec_format.currentData())
+        s.setValue("rec_dir", self.rec_dir.text())
         s.setValue("tx_device", self.tx_combo.currentData() or "")
         s.setValue("tx_enable", self.tx_enable.isChecked())
         s.setValue("tx_gain", self.tx_gain.value())
@@ -478,6 +517,38 @@ class MainWindow(QMainWindow):
         sink = self.radio._sinks.get("card")
         if sink is not None:
             sink.gain = self.volume.value() / 100.0
+
+    # ================================================================== recording
+    def _choose_dir(self, *_):
+        d = QFileDialog.getExistingDirectory(self, "Recording folder", self.rec_dir.text())
+        if d:
+            self.rec_dir.setText(d)
+
+    @Slot(bool)
+    def _record_toggled(self, on):
+        if not on:
+            info = self.radio.stop_recording()
+            self.rec_btn.setText("● Record")
+            self._rec_started = None
+            if info:
+                self.rec_label.setText("Saved %s (%.0f s)" % (os.path.basename(info["path"]), info["seconds"]))
+            return
+        folder = self.rec_dir.text().strip() or os.path.expanduser("~")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            st = self.radio.rig
+            mode = st.mode_label if st.mode else "rx"
+            path = os.path.join(folder, default_recording_name(st.freq_hz, mode, self.rec_format.currentData()))
+            self.radio.start_recording(path)
+        except Exception as e:
+            QMessageBox.warning(self, "Record", str(e))
+            self.rec_btn.blockSignals(True)
+            self.rec_btn.setChecked(False)
+            self.rec_btn.blockSignals(False)
+            return
+        self._rec_started = time.monotonic()
+        self.rec_btn.setText("■ Stop")
+        self.rec_label.setText(os.path.basename(path))
 
     # ================================================================== transmit
     def _refresh_tx_devices(self, select=None):
@@ -652,6 +723,12 @@ class MainWindow(QMainWindow):
                 self.audio_enable.blockSignals(True)
                 self.audio_enable.setChecked(False)
                 self.audio_enable.blockSignals(False)
+            elif payload == "file":
+                self.rec_btn.blockSignals(True)
+                self.rec_btn.setChecked(False)
+                self.rec_btn.setText("● Record")
+                self.rec_btn.blockSignals(False)
+                self._rec_started = None
         elif kind == "rig_clients":
             n = payload[0]
             if self.rigctld is not None:
@@ -673,6 +750,10 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("rigctl: %s" % payload, 3000)
 
     def _tick(self, *_):
+        if self.radio.recording_seconds() is not None and self._rec_started is not None:
+            wall = time.monotonic() - self._rec_started
+            self.rec_label.setText("Recording  %02d:%02d:%02d" % (wall // 3600, wall % 3600 // 60, wall % 60)
+                                   + ("" if self.radio.connected else "  (waiting for audio)"))
         lvl = self.radio.tx_level()
         self.tx_level.setValue(int(100 * min(1.0, lvl)) if lvl is not None else 0)
         stats = self.radio.audio_stats()
