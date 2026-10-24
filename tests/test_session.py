@@ -118,6 +118,16 @@ class TestSession(unittest.TestCase):
         texts = [t for t, lvl in self.events.kinds("status")]
         self.assertTrue(any("reports CI-V address B6h but A4h" in t for t in texts), texts)
 
+    def test_radio_in_use_by_other_client(self):
+        spec = self._start(in_use_by=("SHACK-PC", (10, 0, 0, 7)))
+        self.session.connect(spec)
+        self.assertTrue(wait_for(lambda: any("in use by another client ('SHACK-PC' at 10.0.0.7)" in t
+                                             for t, _ in self.events.kinds("status")), 6))
+        self.assertFalse(self.session.connected)
+        # never asked for streams it can't have, and logged out cleanly
+        self.assertFalse(any(e[1].startswith("stream_request") for e in self.radio.events))
+        self.assertIn(("control", "auth_01"), self.radio.events)
+
     def test_bad_password_stops(self):
         spec = self._start(password="wrong")
         self.session.connect(spec)

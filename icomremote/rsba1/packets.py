@@ -113,6 +113,9 @@ def _inner(length_code, request_type, magic, inner_seq):
                   inner_seq & 0xFF, (inner_seq >> 8) & 0xFF, 0x00])
 
 
+CLIENT_NAME = "icom-pc"      # what the Icom software sends; the radio echoes it back
+
+
 def login(local_sid, remote_sid, inner_seq, auth_start_id, user_enc, pass_enc):
     p = bytearray(LEN_LOGIN)
     p[0:16] = header(LEN_LOGIN, T_DATA, 0, local_sid, remote_sid)
@@ -120,7 +123,7 @@ def login(local_sid, remote_sid, inner_seq, auth_start_id, user_enc, pass_enc):
     p[26:28] = auth_start_id
     p[64:80] = user_enc
     p[80:96] = pass_enc
-    p[96:104] = b"icom-pc\x00"
+    p[96:96 + len(CLIENT_NAME)] = CLIENT_NAME.encode()
     return bytes(p)
 
 
@@ -258,7 +261,7 @@ def redact(d):
     return d
 
 
-def hexdump(d, limit=96):
+def hexdump(d, limit=200):
     d = redact(d)
     s = d[:limit].hex(" ")
     return s + (" …(+%d)" % (len(d) - limit) if len(d) > limit else "")

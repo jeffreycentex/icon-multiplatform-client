@@ -96,13 +96,15 @@ class _Port(asyncio.DatagramProtocol):
 
 class FakeRadio:
     def __init__(self, user="beer", password="beerbeer", name="IC-7300MK2", civ_address=0xB6,
-                 freq_hz=14_074_000, mode=0x01, data=True, filt=1, drop_audio=(), send_audio=True):
+                 freq_hz=14_074_000, mode=0x01, data=True, filt=1, drop_audio=(), send_audio=True,
+                 in_use_by=None):
         self.user, self.password = user, password
         self.name = name
         self.civ_address = civ_address
         self.freq_hz, self.mode, self.data, self.filt = freq_hz, mode, data, filt
         self.drop_audio = set(drop_audio)
         self.send_audio = send_audio
+        self.in_use_by = in_use_by          # (computer, ip) of another client holding the radio
         self.events = []
         self.civ_received = []
         self.tx_audio = bytearray()
@@ -192,24 +194,19 @@ class FakeRadio:
             r = bytearray(P.LEN_AUTH)
             r[0:16] = c.hdr(P.LEN_AUTH)
             r[16:32] = bytes([0, 0, 0, 0x30, 0x02, magic, 0, d[23], d[24], 0]) + bytes(d[26:32])
-            c.send(bytes(r))
-            self.events.append(("control", "auth_%02x" % magic))
+            # Order seen from a real IC-7300MK2: capabilities, status, then the auth reply.
             if magic == 0x05 and ("control", "caps") not in self.events:
                 self._send_caps()
+            c.send(bytes(r))
+            self.events.append(("control", "auth_%02x" % magic))
         elif n == P.LEN_CONNINFO:
             name = P.cstring(d[64:96])
             self.events.append(("control", "stream_request:%s" % name))
             self.requested_rate = struct.unpack_from(">I", d, 116)[0]
             self.requested_ports = (struct.unpack_from(">I", d, 124)[0],
                                     struct.unpack_from(">I", d, 128)[0])
-            r = bytearray(P.LEN_CONNINFO)
-            r[0:16] = c.hdr(P.LEN_CONNINFO)
-            r[16:26] = bytes([0, 0, 0, 0x80, 0x03, 0x00, 0, 0, 0, 0])
-            r[26:32] = os.urandom(6)
-            nm = self.name.encode()
-            r[64:64 + len(nm)] = nm
-            r[96] = 0x01 if name == self.name else 0x00
-            c.send(bytes(r))
+            if name == self.name and self.in_use_by is None:
+                self._send_status(in_use=True, computer=P.CLIENT_NAME, ip=(192, 168, 3, 3))
 
     def _send_caps(self):
         c = self.control
@@ -225,6 +222,25 @@ class FakeRadio:
         r[o + 82] = self.civ_address
         c.send(bytes(r))
         self.events.append(("control", "caps"))
+        # Like the IC-7300MK2: an unsolicited status right after the capabilities.
+        if self.in_use_by is None:
+            self._send_status(in_use=False)
+        else:
+            self._send_status(True, *self.in_use_by)
+
+    def _send_status(self, in_use, computer="", ip=(0, 0, 0, 0)):
+        """0x90 status: in-use flag at 96, computer name at 100, IPv4 at 132."""
+        c = self.control
+        r = bytearray(P.LEN_CONNINFO)
+        r[0:16] = c.hdr(P.LEN_CONNINFO)
+        r[16:26] = bytes([0, 0, 0, 0x80, 0x03, 0x00, 0, 0, 0, 0])
+        r[26:32] = os.urandom(6)
+        nm = self.name.encode()
+        r[64:64 + len(nm)] = nm
+        r[96] = 0x01 if in_use else 0x00
+        r[100:100 + len(computer)] = computer.encode()
+        r[132:136] = bytes(ip)
+        c.send(bytes(r))
 
     # ------------------------------------------------------------------ serial
     def _serial(self, d):

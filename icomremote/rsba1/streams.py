@@ -98,6 +98,8 @@ class ControlStream(UdpStream):
     def _maybe_request_streams(self):
         if self._streams_requested or not self._auth_ok or self.capabilities is None:
             return
+        if self.closed or self._ready is None or self._ready.done():
+            return
         self._streams_requested = True
         name = self.capabilities.name or "IC-705"
         log.info("requesting serial and audio streams from %s", name)
@@ -136,20 +138,36 @@ class ControlStream(UdpStream):
                 self._fail(StreamError("the radio reports it was disconnected"))
             return
         if n == P.LEN_CONNINFO and d[:6] == b"\x90\x00\x00\x00\x00\x00":
-            if self._ready is not None and not self._ready.done():
-                if d[96] == 0x01:
-                    self.remote_sid = int.from_bytes(d[8:12], "big")
-                    self.local_sid = int.from_bytes(d[12:16], "big")
-                    self.auth_id = bytes(d[26:32])
-                    name = P.cstring(d[64:96])
-                    log.info("streams granted, device '%s'", name)
-                    self._ready.set_result(SessionInfo(name, self.capabilities))
-                else:
-                    log.warning("stream request answered with busy flag %02x: %s", d[96], P.hexdump(d, 144))
-                    self._ready.set_exception(RadioBusyError(
-                        "the radio did not grant the audio/serial streams (busy? another client?)"))
+            self._on_conninfo(d)
             return
+        if n == 16 and d[4] in (P.T_I_AM_HERE, P.T_ARE_YOU_READY):
+            return                        # duplicate handshake answers (the radio sends them twice)
         log.debug("control: unhandled %d-byte packet %s", n, P.hexdump(d))
+
+    def _on_conninfo(self, d):
+        """0x90 status: byte 96 = in use, 100..115 = name of the computer using the
+        radio, 132..135 = its IPv4 address. The radio sends one with in-use 0
+        right after login (radio free), and one with in-use 1 and our client
+        name once it has granted our stream request."""
+        in_use = d[96]
+        computer = P.cstring(d[100:116])
+        ip = ".".join(str(b) for b in d[132:136])
+        if self._ready is None or self._ready.done():
+            return
+        if in_use == 0:
+            log.info("radio status: free")
+            return
+        if self._streams_requested and computer == P.CLIENT_NAME:
+            self.remote_sid = int.from_bytes(d[8:12], "big")
+            self.local_sid = int.from_bytes(d[12:16], "big")
+            self.auth_id = bytes(d[26:32])
+            name = P.cstring(d[64:96])
+            log.info("streams granted, device '%s'", name)
+            self._ready.set_result(SessionInfo(name, self.capabilities))
+            return
+        log.warning("radio in use by '%s' (%s): %s", computer, ip, P.hexdump(d, 144))
+        self._ready.set_exception(RadioBusyError(
+            "the radio is in use by another client ('%s' at %s)" % (computer or "?", ip)))
 
     async def _reauth_loop(self):
         try:
