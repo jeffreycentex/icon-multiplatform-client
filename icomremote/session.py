@@ -45,6 +45,9 @@ FAST_RETRY_DELAY = 1.0
 SLOW_RETRY_DELAY = 65.0     # the IC-705 drops audio if you re-login too often
 POLL_INTERVAL = 0.25                # TX meters every tick, S-meter every 2nd, state every 8th
 TUNE_TIMEOUT = 30.0
+CIV_SILENT_STANDBY = 3.0            # no CI-V answer for this long: radio is in standby
+LINK_TIMEOUT = 6.0                  # nothing at all from the radio for this long: connection lost
+POWER_ON_TIMEOUT = 25.0
 RF_POWER_HOLD = 1.5
 STATS_INTERVAL = 1.0
 DEFAULT_PTT_TIMEOUT = 180.0
@@ -123,6 +126,14 @@ class RadioSession:
         self.tuner = None                # 0 off, 1 on, 2 tuning
         self._tuning = False             # a TUNE started from the app is running
         self._tune_timer = None
+        # power: "on", "standby" (network up, CI-V silent) or None (unknown)
+        self.power = None
+        self.remote_power_setting = None   # 1A 05 01 09 value, None = unknown
+        self._last_civ_rx = 0.0
+        self._powering_on = False
+        self._power_on_deadline = 0.0
+        self._ignore_civ_until = 0.0
+        self._mods_ready = False           # DATA MOD setup done for this power-on
         self._tuner_reads = 0            # 1C 01 reads sent / answers received, to ignore
         self._tuner_replies = 0          # answers to reads sent before a tune started
         self._tune_fence = 0
@@ -280,7 +291,15 @@ class RadioSession:
                       civ.read_if_width(addr), civ.read_ptt(addr), civ.read_rf_power(addr),
                       civ.read_tuner(addr)):
                 self._tx_civ(f)
-            await self._setup_mods(info.radio_name, spec.host)
+            self.power = None
+            self._mods_ready = False
+            self._last_civ_rx = 0.0
+            r = await self._civ_ask(civ.read_freq(addr), lambda k, v: k == "reply" and v == "freq",
+                                    timeout=1.5, attempts=2)
+            if r is not None:
+                await self._power_is_on(info.radio_name, spec.host)
+            else:
+                self._set_power("standby")
             self._open_tx_sources()
             tasks.append(loop.create_task(self._poll_loop(addr)))
             tasks.append(loop.create_task(self._stats_loop()))
@@ -304,12 +323,15 @@ class RadioSession:
                 try:
                     self._stop_tune()
                     self._unkey()
-                    await self._restore_data_mod()
+                    if self.power == "on":
+                        await self._restore_data_mod()
                 except Exception:
                     log.exception("cleanup before logout failed")
             else:
                 self._unkey()
             self._close_tx_sources()
+            self.power = None
+            self._powering_on = False
             self._set_connected(False)
             # Same order as kappanhang: deauth + close control, then serial, then audio.
             if control is not None:
@@ -362,6 +384,22 @@ class RadioSession:
                 if s is None:
                     return
                 n += 1
+                now = time.monotonic()
+                c = self._control
+                if c is not None and c.last_rx and now - c.last_rx > LINK_TIMEOUT:
+                    c._fail(StreamError("the radio stopped responding (no packets for %.0f s)"
+                                        % LINK_TIMEOUT))
+                    return
+                if self.power == "on" and self._last_civ_rx and now - self._last_civ_rx > CIV_SILENT_STANDBY:
+                    self._set_power("standby")
+                if self._powering_on and now > self._power_on_deadline:
+                    self._powering_on = False
+                    self._emit("powering_on", False)
+                    self._status("The radio did not respond to power on", "error")
+                if self.power == "standby":
+                    if n % 4 == 0:                # cheap probe: does CI-V answer again?
+                        self._tx_civ(civ.read_freq(addr))
+                    continue
                 if self.tx or self._keyed or self._tuning:
                     self._tx_civ(civ.read_po(addr))
                     self._tx_civ(civ.read_swr(addr))
@@ -421,7 +459,15 @@ class RadioSession:
         dec = self._decoder
         if dec is None:
             return
-        for kind, value in dec.feed(data):
+        events = dec.feed(data)
+        # Liveness: answers that carry state. Not bare OK/NG (the radio
+        # acknowledges our power-off), and not right after a power-off.
+        if (any(k not in ("foreign", "other", "ack") for k, _ in events)
+                and time.monotonic() >= self._ignore_civ_until):
+            self._last_civ_rx = time.monotonic()
+            if self.power == "standby" and self._mods_ready is not None:
+                self._loop.create_task(self._woke_up())
+        for kind, value in events:
             for match, fut in list(self._civ_waiters):
                 if not fut.done() and match(kind, value):
                     fut.set_result((kind, value))
@@ -528,9 +574,14 @@ class RadioSession:
     # after 'F' sees the new value), queues the CI-V command and a read-back;
     # the radio's answer then confirms or corrects the state.
 
-    def _apply(self, new_state, frames):
+    def _require_on(self):
         if not self._connected:
             raise NotConnected("not connected to the radio")
+        if self.power != "on":
+            raise NotConnected("the radio is not powered on")
+
+    def _apply(self, new_state, frames):
+        self._require_on()
         with self._rig_lock:
             self.rig = new_state
         self._emit("rig", new_state)
@@ -634,6 +685,8 @@ class RadioSession:
         """Why PTT can't be keyed now, or None if it can."""
         if not self._connected:
             return "not connected to the radio"
+        if self.power != "on":
+            return "the radio is not powered on"
         if not self.rig.mode:
             return "the radio's mode is not known yet"
         if self._tuning or self.tuner == civ.TUNER_TUNING:
@@ -740,11 +793,87 @@ class RadioSession:
         self._ptt_timer = None
         self._unkey(reason="Unkeyed: PTT timeout (%.0f s)" % self.ptt_timeout)
 
+    # ------------------------------------------------------------------ power
+    def _set_power(self, state):
+        if state == self.power:
+            return
+        self.power = state
+        if self._audio is not None:
+            self._audio.require_audio = state == "on"
+        if state == "standby":
+            self._unkey(reason="Unkeyed: the radio went to standby" if self._keyed else None)
+            if self._tuning:
+                self._end_tune("Tune stopped: the radio went to standby", "error")
+        self._emit("power", state)
+        if state == "standby":
+            self._status("Radio is in standby (network up, radio off)")
+
+    async def _power_is_on(self, radio_name, host):
+        """Radio answers CI-V: read the remote power setting, switch DATA MOD etc."""
+        self._mods_ready = None                     # setup running
+        self._set_power("on")
+        a = self.civ_address
+        for f in (civ.read_mode(a), civ.read_data_mode(a), civ.read_if_width(a), civ.read_ptt(a),
+                  civ.read_rf_power(a), civ.read_tuner(a)):
+            self._tx_civ(f)
+        item = civ.REMOTE_POWER_ITEM.get(radio_name)
+        if item is not None:
+            v = await self._read_menu(item)
+            if v is not None and v != self.remote_power_setting:
+                self.remote_power_setting = v
+                self._emit("remote_power_setting", v)
+        await self._setup_mods(radio_name, host)
+        self._mods_ready = True
+        if self._powering_on:
+            self._powering_on = False
+            self._emit("powering_on", False)
+            self._status("Radio powered on")
+
+    async def _woke_up(self):
+        if self.power != "standby" or self._mods_ready is None:
+            return
+        info = self.info
+        await self._power_is_on(info.radio_name, self._spec.host)
+
+    def power_off(self):
+        """Thread-safe: unkey, put DATA MOD / DATA OFF MOD back, then switch the radio off."""
+        if not self._connected or self.power != "on":
+            raise NotConnected("the radio is not on")
+
+        async def _do():
+            self._stop_tune()
+            self._unkey()
+            await self._restore_data_mod()           # the radio may be used locally next
+            self._ignore_civ_until = time.monotonic() + 2.0
+            self._tx_civ(civ.power_off(self.civ_address))
+            self._mods_ready = False
+            self._set_power("standby")
+            self._status("Radio switched off" + (
+                "; its network stays up, so it can be switched on from here"
+                if self.remote_power_setting == 0x01 else
+                "; its network goes down too (Power OFF Setting is Shutdown only)"
+                if self.remote_power_setting == 0x00 else ""))
+        asyncio.run_coroutine_threadsafe(_do(), self._loop)
+
+    def power_on(self):
+        """Thread-safe: wake a radio in standby."""
+        if not self._connected:
+            raise NotConnected("not connected to the radio's network server")
+        if self.power == "on":
+            return
+
+        def _do():
+            self._powering_on = True
+            self._power_on_deadline = time.monotonic() + POWER_ON_TIMEOUT
+            self._emit("powering_on", True)
+            self._status("Switching the radio on …")
+            self._tx_civ(civ.power_on(self.civ_address))
+        self._loop.call_soon_threadsafe(_do)
+
     # ------------------------------------------------------------------ RF power and tuner
     def set_rf_power(self, percent):
         """Thread-safe: RF power 0-100 %."""
-        if not self._connected:
-            raise NotConnected("not connected to the radio")
+        self._require_on()
         level = int(round(max(0.0, min(100.0, float(percent))) * 255 / 100))
         self.rf_power = level
         self._rf_hold_until = time.monotonic() + RF_POWER_HOLD
@@ -758,8 +887,7 @@ class RadioSession:
 
     def tune(self):
         """Thread-safe: run the internal antenna tuner's tune cycle (like the TUNER button)."""
-        if not self._connected:
-            raise NotConnected("not connected to the radio")
+        self._require_on()
         if self.ptt or self._keyed:
             raise PttRefused("TUNE refused: transmitting")
         if self._tuning:

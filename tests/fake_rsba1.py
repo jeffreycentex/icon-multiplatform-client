@@ -55,8 +55,10 @@ class _Port(asyncio.DatagramProtocol):
         return P.header(length, ptype, seq, self.sid, self.client_sid)
 
     def datagram_received(self, d, addr):
-        self.addr = addr
         r = self.radio
+        if r.network_down:
+            return
+        self.addr = addr
         if len(d) >= 16:
             self.client_sid = int.from_bytes(d[8:12], "big")
         if len(d) == 16 and d[4] == P.T_ARE_YOU_THERE:
@@ -99,7 +101,8 @@ class FakeRadio:
     def __init__(self, user="beer", password="beerbeer", name="IC-7300MK2", civ_address=0xB6,
                  freq_hz=14_074_000, mode=0x01, data=True, filt=1, drop_audio=(), send_audio=True,
                  in_use_by=None, data_mod=0x01, data_off_mod=0x00, lan_mod_level=128, menu_ng=False,
-                 tune_seconds=0.6, tune_result=0x01, swr_raw=48):
+                 tune_seconds=0.6, tune_result=0x01, swr_raw=48,
+                 powered=True, remote_power=0x01, power_on_works=True, wake_seconds=1.0):
         self.user, self.password = user, password
         self.name = name
         self.civ_address = civ_address
@@ -107,7 +110,8 @@ class FakeRadio:
         self.drop_audio = set(drop_audio)
         self.send_audio = send_audio
         self.in_use_by = in_use_by          # (computer, ip) of another client holding the radio
-        self.menu = {b"\x00\x85": data_mod, b"\x00\x84": data_off_mod, b"\x00\x83": lan_mod_level}
+        self.menu = {b"\x00\x85": data_mod, b"\x00\x84": data_off_mod, b"\x00\x83": lan_mod_level,
+                     b"\x01\x09": remote_power}
         self.menu_ng = menu_ng               # radio that doesn't know these menu items
         self.menu_writes = []
         self.ptt = False
@@ -121,6 +125,11 @@ class FakeRadio:
         self.tune_aborted = 0
         self._tune_end = None
         self.swr_raw = swr_raw
+        self.powered = powered               # False = standby: network up, CI-V silent, no audio
+        self.network_down = False            # after 18 00 with "Shutdown only": nothing answers
+        self.power_on_works = power_on_works
+        self.wake_seconds = wake_seconds
+        self.power_log = []                  # "off" / "on" commands received
         self.tx_audio_while_ptt = 0
         self.tx_audio_while_rx = 0
         self.events = []
@@ -279,8 +288,26 @@ class FakeRadio:
             self.civ_received.append(f)
             if f[2] != self.civ_address:
                 continue
+            if f[4] == 0x18 and len(f) == 7:
+                self._power_cmd(f[5])
+                continue
+            if not self.powered:
+                continue                         # standby: CI-V doesn't answer
             for reply in self._civ_reply(f):
                 self._serial_send(reply)
+
+    def _power_cmd(self, on):
+        self.power_log.append("on" if on else "off")
+        if on:
+            if not self.powered and self.power_on_works and not self.network_down:
+                self._loop.call_later(self.wake_seconds, setattr, self, "powered", True)
+            return
+        if self.powered:
+            self._serial_send(civ.frame(civ.CONTROLLER, civ.OK, frm=self.civ_address))
+        self.powered = False
+        self.ptt = False
+        if self.menu[b"\x01\x09"] == 0x00:      # Shutdown only: the network goes down too
+            self.network_down = True
 
     def _civ_reply(self, f):
         a = self.civ_address
@@ -377,7 +404,7 @@ class FakeRadio:
             while True:
                 await asyncio.sleep(0.02)
                 a = self.audio
-                if not (self.send_audio and a.ready and self.serial.ready):
+                if not (self.send_audio and self.powered and a.ready and self.serial.ready):
                     continue
                 t = (np.arange(960) + self._phase) / 48000.0
                 self._phase += 960
@@ -398,6 +425,8 @@ class FakeRadio:
             seq = 0
             while True:
                 await asyncio.sleep(0.5)
+                if self.network_down:
+                    continue
                 for p in (self.control, self.serial, self.audio):
                     if p is not None and p.ready:
                         p.transport.sendto(P.ping(seq, p.sid, p.client_sid, False, os.urandom(4)), p.addr)
@@ -409,6 +438,8 @@ class FakeRadio:
         try:
             while True:
                 await asyncio.sleep(0.3)
+                if self.network_down:
+                    continue
                 s = self.serial
                 if s is not None and s.ready:
                     s.send(P.control(P.T_DATA, 0, s.sid, s.client_sid))

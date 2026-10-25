@@ -22,8 +22,8 @@ IC-7300MK2 ◄udp─┤ session thread (asyncio): control / serial / audio  │
 | 1 | Login, UDP streams, RX audio, CI-V read | done, verified on an IC-7300MK2 |
 | 2 | GUI, frequency/mode/filter control, S-meter, rigctld | done, verified on an IC-7300MK2 |
 | 3 | TX audio (data and voice), PTT with safety rules, DATA MOD / DATA OFF MOD switch and restore, recording | done, verified on an IC-7300MK2 |
-| 4 | Po/SWR on TX, RF power, TUNE | **this release** |
-| 5 | Power ON/OFF | |
+| 4 | Output/SWR readout, RF power, TUNE | done, verified on an IC-7300MK2 |
+| 5 | Power ON/OFF | **this release** |
 | 6 | PyInstaller builds | |
 
 
@@ -166,6 +166,27 @@ Transmit stops (PTT released) when:
 Audio is only sent to the radio while PTT is on. The **TX/RX** indicator shows
 what the radio reports, not just what was requested.
 
+### Power ON / OFF
+
+The button next to the radio info reads **Power OFF** when the radio is on and
+**Power ON** when it is in standby.
+
+- **Power OFF** asks for confirmation, stops any transmission or tune, puts
+  DATA MOD / DATA OFF MOD back, then switches the radio off.
+- **Power ON** sends the CI-V power-on command and waits up to 25 s for the
+  radio to answer. Then DATA MOD / DATA OFF MOD are switched to LAN again.
+- While the radio is in standby the app stays connected to its network
+  server; tuning and transmit controls are disabled. Switching the radio off
+  or on at the radio is noticed within a few seconds.
+- Switching on remotely needs the radio's **Power OFF Setting (for Remote
+  Control)** on **Standby/Shutdown**, so its network stays up while it is
+  off. The app reads that setting (CI-V `1A 05 01 09`) and the confirm dialog
+  says whether you'll be able to switch the radio on again from here. With
+  *Shutdown only*, the network goes down with the radio and the app reports
+  that the radio stopped responding.
+- rigctl `get_powerstat` reports on (1) / standby (2); `set_powerstat` is
+  accepted and ignored: programs don't switch the radio on or off.
+
 ### RF power and TUNE
 
 - **Power** sets the radio's RF POWER (0-100 %) when you release the slider;
@@ -290,6 +311,8 @@ IC-7300MK2. Covered:
 - recording: WAV (and M4A when PyAV is installed), including starting before connecting
 - RF power read/set, Po/SWR polled only while transmitting, TUNE cycle (success, failure,
   30 s timeout, abort on disconnect, refusals both ways)
+- power: off/on from the app, off/on at the radio, connecting to a radio in standby,
+  power-on ignored, 'Shutdown only' (network goes down), unkey and DATA MOD restore before off
 - the GUI, run offscreen against the fake radio (needs PySide6; skipped otherwise)
 
 ## Licensing

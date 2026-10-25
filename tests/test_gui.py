@@ -130,6 +130,23 @@ class TestGui(unittest.TestCase):
         self.assertFalse(w.tune_btn.isEnabled())
         self.assertTrue(self.pump_until(lambda: w.tuner_label.text() == "Tuner: on" and w.tune_btn.isEnabled()))
 
+        # ---- power off / on
+        from PySide6.QtWidgets import QMessageBox
+        self.assertEqual(w.power_btn.text(), "Power OFF")
+        asked = []
+        orig = QMessageBox.question
+        QMessageBox.question = staticmethod(lambda *a, **k: (asked.append(a[2]), QMessageBox.Yes)[1])
+        try:
+            w.power_btn.click()
+        finally:
+            QMessageBox.question = orig
+        self.assertIn("network stays up", asked[0])
+        self.assertTrue(self.pump_until(lambda: not self.radio.powered and w.power_btn.text() == "Power ON"))
+        self.assertFalse(w.freq.isEnabled())                 # controls off in standby
+        self.assertEqual(self.radio.menu[b"\x00\x85"], 0x01)   # DATA MOD put back before power-off
+        w.power_btn.click()
+        self.assertTrue(self.pump_until(lambda: w.power_btn.text() == "Power OFF" and w.freq.isEnabled(), 10))
+
         w._connect_clicked()                                # Disconnect
         self.assertTrue(self.pump_until(lambda: not w.freq.isEnabled()
                                         and w.connect_btn.text() == "Connect"))

@@ -38,7 +38,7 @@ scope, CW/RTTY modes.
 | 2 | GUI, freq/mode/filter, S-meter, rigctld | verified |
 | 3 | TX audio, PTT safety, DATA MOD + DATA OFF MOD switch/restore, voice PTT (armed Space), recording | verified (spots on PSKReporter; DATA MOD restore confirmed) |
 | 4 | RF power, TUNE, Output/SWR readout | TUNE + PTT verified; readout redesigned after feedback |
-| 5 | Power ON/OFF | in progress |
+| 5 | Power ON/OFF | built and tested against the fake radio; **unverified on the real radio** |
 | 6 | PyInstaller builds (`icomremote.spec`) | not started |
 
 ## Spec decisions (from the owner)
@@ -155,6 +155,23 @@ the real IC-7300MK2 that differ from or add to kappanhang:
 
 Scales: S-meter 0=S0, 120=S9, 241=S9+60. Po 143=50 %, 213=100 %. SWR 48=1.5,
 80=2.0, 120=3.0.
+
+## Power (step 5) design and unknowns
+
+- Power state = CI-V liveness: `on` if the radio answers state reads,
+  `standby` if CI-V is silent > 3 s while the UDP session is alive. Bare
+  OK/NG don't count (the radio ACKs `18 00`), and CI-V is ignored for 2 s
+  after a power-off.
+- In standby the audio-timeout reconnect is suspended (`AudioStream.require_audio`);
+  instead a link check fails the session if *nothing* arrives for 6 s.
+- Power OFF: stop tune, unkey, restore DATA MOD/DATA OFF MOD, then `18 00`.
+  Power ON: 25 x FE preamble + `18 01`, wait up to 25 s; on wake, re-read
+  state and switch the MODs to LAN again (`_power_is_on`).
+- Reports conflict on real hardware (AetherSDR issue #5349, wfview forum):
+  whether a standby radio keeps granting RS-BA1 streams, whether audio stops,
+  and whether `18 01` over LAN wakes the radio or only the display. The fake
+  radio models one plausible behaviour; **confirm on the IC-7300MK2 and
+  adjust the fake to match**.
 
 ## Concurrency lessons (both found by tests, both fixed)
 

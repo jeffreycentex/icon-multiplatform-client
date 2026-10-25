@@ -351,3 +351,25 @@ def read_tuner(addr):
 def set_tuner(addr, value):
     """0 = tuner off, 1 = tuner on (also stops a tune), 2 = start tuning."""
     return frame(addr, 0x1C, 0x01, bytes([value]))
+
+
+# ---------------------------------------------------------------- power
+
+WAKE_PREAMBLE = 25        # FE bytes before 18 01 (needed on serial/USB at 19200 bps;
+                          # harmless on the LAN, where extra FEs are skipped)
+
+
+def power_off(addr):
+    return frame(addr, 0x18, 0x00)
+
+
+def power_on(addr, preamble=WAKE_PREAMBLE):
+    return b"\xfe" * preamble + frame(addr, 0x18, 0x01)
+
+
+# "Power OFF Setting (for Remote Control)": 00 = Shutdown only (network goes
+# down with the radio), 01 = Standby/Shutdown (network stays up in standby).
+REMOTE_POWER_ITEM = {
+    "IC-7300MK2": b"\x01\x09",
+}
+REMOTE_POWER_NAMES = {0x00: "Shutdown only", 0x01: "Standby/Shutdown"}

@@ -278,6 +278,7 @@ class AudioStream(_ReceivingStream):
         self._timeout_handle = None
         self.rx_audio_packets = 0
         self.rx_audio_bytes = 0
+        self.require_audio = True
 
     async def start(self):
         await self.open()
@@ -295,6 +296,9 @@ class AudioStream(_ReceivingStream):
             self._timeout_handle = self._loop.call_later(AUDIO_TIMEOUT, self._timed_out)
 
     def _timed_out(self):
+        if not self.require_audio:              # radio in standby: no audio is expected
+            self._arm_timeout()
+            return
         self._fail(StreamError("no audio from the radio for %.0f s (check DATA MOD / LAN audio "
                                "settings, or reboot the radio)" % AUDIO_TIMEOUT))
 

@@ -124,7 +124,14 @@ class MainWindow(QMainWindow):
         g.addWidget(self.password, 2, 1)
         g.addWidget(self.remember_pw, 2, 2, 1, 2)
         g.addWidget(self.conn_label, 3, 0, 1, 4)
-        g.addWidget(self.info_label, 4, 0, 1, 4)
+        self.power_btn = QPushButton("Power")
+        self.power_btn.setEnabled(False)
+        self.power_btn.setToolTip("Switch the radio off (to standby) or on.\n"
+                                  "Switching on from here needs the radio's Power OFF Setting\n"
+                                  "(for Remote Control) set to Standby/Shutdown.")
+        self.power_btn.clicked.connect(self._power_clicked)
+        g.addWidget(self.info_label, 4, 0, 1, 3)
+        g.addWidget(self.power_btn, 4, 3)
         g.addWidget(QLabel("S-meter"), 5, 0)
         g.addWidget(self.smeter, 5, 1, 1, 3)
         g.setColumnStretch(1, 1)
@@ -486,6 +493,49 @@ class MainWindow(QMainWindow):
         self._save_settings()
         self.radio.connect(spec)
         self.connect_btn.setText("Disconnect")
+
+    def _update_power_btn(self, powering_on=False):
+        p = self.radio.power if self.radio.connected else None
+        if powering_on:
+            self.power_btn.setText("Powering on …")
+            self.power_btn.setEnabled(False)
+        elif p == "on":
+            self.power_btn.setText("Power OFF")
+            self.power_btn.setEnabled(True)
+        elif p == "standby":
+            self.power_btn.setText("Power ON")
+            self.power_btn.setEnabled(True)
+        else:
+            self.power_btn.setText("Power")
+            self.power_btn.setEnabled(False)
+
+    def _power_clicked(self, *_):
+        if self.radio.power == "on":
+            setting = self.radio.remote_power_setting
+            if setting == 0x01:
+                note = "Its network stays up, so you can switch it on again from here."
+            elif setting == 0x00:
+                note = ("Its Power OFF Setting is 'Shutdown only': the network goes down too, "
+                        "and you will NOT be able to switch it on from here.")
+            else:
+                note = "Whether it can be switched on again from here is unknown."
+            if self.radio.ptt or self.radio.tx:
+                note = "Transmit will be stopped. " + note
+            ans = QMessageBox.question(self, "Power off",
+                                       "Switch the radio off?\n\nDATA MOD / DATA OFF MOD are put back "
+                                       "first.\n" + note,
+                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans != QMessageBox.Yes:
+                return
+            try:
+                self.radio.power_off()
+            except NotConnected as e:
+                self.statusBar().showMessage(str(e), 5000)
+        else:
+            try:
+                self.radio.power_on()
+            except NotConnected as e:
+                self.statusBar().showMessage(str(e), 5000)
 
     def _set_controls_enabled(self, on):
         for w in (self.freq, self.data_btn, self.ptt_btn, self.voice_arm, self.rf_power, self.tune_btn,
@@ -896,8 +946,21 @@ class MainWindow(QMainWindow):
             self.freq.blockSignals(False)
             self._radio_info = "%s · CI-V %02Xh" % (payload["name"], payload["civ_address"])
             self.info_label.setText(self._radio_info)
+        elif kind == "power":
+            self._set_controls_enabled(self.radio.connected and payload == "on")
+            self._update_power_btn()
+            if payload == "standby":
+                self.smeter.setValue(0)
+                self.smeter.setFormat("standby")
+        elif kind == "powering_on":
+            self._update_power_btn(powering_on=payload)
+        elif kind == "remote_power_setting":
+            if payload == 0x00:
+                self.statusBar().showMessage("Note: the radio's Power OFF Setting is 'Shutdown only'; "
+                                             "after Power OFF it can't be switched on from here", 10000)
         elif kind == "connected":
-            self._set_controls_enabled(payload)
+            self._set_controls_enabled(payload and self.radio.power == "on")
+            self._update_power_btn()
             if payload:
                 self.connect_btn.setText("Disconnect")
             else:

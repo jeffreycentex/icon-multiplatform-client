@@ -255,7 +255,7 @@ class RigctldServer:
             return ([("Frequency", "%d" % st.freq_hz)], 0) if known else ([], E_IO)
         if cmd == "set_freq":
             hz = float(args[0])
-            if not c.connected:
+            if not c.connected or c.power != "on":
                 return [], E_IO
             try:
                 c.set_frequency(hz)
@@ -273,7 +273,7 @@ class RigctldServer:
             if want is None:
                 log.info("rigctl: unsupported mode %s", args[0])
                 return [], E_NAVAIL
-            if not c.connected:
+            if not c.connected or c.power != "on":
                 return [], E_IO
             if (st.mode, st.data) != want:          # passband ignored: keep the radio's filter
                 c.set_mode(want[0], want[1])
@@ -311,7 +311,9 @@ class RigctldServer:
         if cmd == "chk_vfo":
             return None, "CHKVFO 0\n"     # same reply kiwiclientd uses with WSJT-X/fldigi
         if cmd == "get_powerstat":
-            return [("Power Status", "1" if c.connected else "0")], 0
+            # hamlib: 0 off, 1 on, 2 standby. set_powerstat is accepted but ignored:
+            # programs don't switch the radio on or off.
+            return [("Power Status", {"on": "1", "standby": "2"}.get(c.power, "0"))], 0
         if cmd == "get_lock_mode":
             return [("Locked", "0")], 0
         if cmd in ("get_rit", "get_xit"):
