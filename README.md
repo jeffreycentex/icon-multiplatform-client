@@ -326,11 +326,14 @@ GitHub Actions. Open the repository's **Actions** tab → latest
 appear under **Releases**.
 
 - **macOS**: unzip and move *Icom Remote.app* to Applications. The app is not
-  signed by Apple, so the first time right-click → **Open** → **Open** (or
-  run `xattr -dr com.apple.quarantine "/Applications/Icom Remote.app"`).
+  signed by Apple, so macOS blocks the first launch. On macOS 15 and later:
+  open it once, dismiss the warning, then **System Settings → Privacy &
+  Security → Open Anyway** (right-click → Open no longer bypasses this). Or
+  remove the download flag: `xattr -dr com.apple.quarantine "/Applications/Icom Remote.app"`.
   Allow **Local Network** and **Microphone** access when asked: without them
-  it can't reach the radio or read transmit audio. The macOS build is for
-  Apple Silicon.
+  it can't reach the radio or read transmit audio. Because each build has a
+  new ad-hoc signature, macOS may ask for these permissions again after an
+  update. The macOS build is for Apple Silicon.
 - **Windows**: unzip anywhere and run `Icom Remote\Icom Remote.exe`.
   SmartScreen may warn about an unknown publisher: *More info* → *Run
   anyway*. Allow it through the firewall (private networks) when asked.
