@@ -61,6 +61,13 @@ def self_check():
             text = f.read()
         if "self-check" in text:
             print(text[text.index("self-check"):])
+    if os.environ.get("GITHUB_ACTIONS") and os.path.exists(log):    # readable via the API
+        with open(log, encoding="utf-8") as f:
+            text = f.read()
+        body = text[text.index("self-check"):] if "self-check" in text else text[-3000:]
+        print("::%s title=built app --check (exit %d)::%s" % (
+            "notice" if r.returncode == 0 else "error", r.returncode,
+            body.replace("%", "%25").replace("\r", "").replace("\n", "%0A")))
     if r.returncode != 0:
         sys.exit("self-check FAILED (exit %d)" % r.returncode)
 
