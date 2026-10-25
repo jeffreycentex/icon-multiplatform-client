@@ -24,7 +24,7 @@ IC-7300MK2 ◄udp─┤ session thread (asyncio): control / serial / audio  │
 | 3 | TX audio (data and voice), PTT with safety rules, DATA MOD / DATA OFF MOD switch and restore, recording | done, verified on an IC-7300MK2 |
 | 4 | Output/SWR readout, RF power, TUNE | done, verified on an IC-7300MK2 |
 | 5 | Power ON/OFF | done, verified on an IC-7300MK2 |
-| 6 | PyInstaller builds | |
+| 6 | Standalone builds (PyInstaller), CI on macOS / Windows / Linux | **this release** |
 
 
 ## Install
@@ -315,6 +315,65 @@ IC-7300MK2. Covered:
   power-on ignored, 'Shutdown only' (network goes down), unkey and DATA MOD restore before off
 - the GUI, run offscreen against the fake radio (needs PySide6; skipped otherwise)
 
+## Standalone app
+
+### Download a build
+
+Every push to `main` is tested and built on macOS, Windows and Linux by
+GitHub Actions. Open the repository's **Actions** tab → latest
+*test-and-build* run → **Artifacts**, and download `IcomRemote-macOS`,
+`IcomRemote-Windows` or `IcomRemote-Linux`. Tagged versions (`v0.6.0` …) also
+appear under **Releases**.
+
+- **macOS**: unzip and move *Icom Remote.app* to Applications. The app is not
+  signed by Apple, so the first time right-click → **Open** → **Open** (or
+  run `xattr -dr com.apple.quarantine "/Applications/Icom Remote.app"`).
+  Allow **Local Network** and **Microphone** access when asked: without them
+  it can't reach the radio or read transmit audio. The macOS build is for
+  Apple Silicon.
+- **Windows**: unzip anywhere and run `Icom Remote\Icom Remote.exe`.
+  SmartScreen may warn about an unknown publisher: *More info* → *Run
+  anyway*. Allow it through the firewall (private networks) when asked.
+- **Linux**: `tar xzf IcomRemote-*-linux-*.tar.gz` and run
+  `"Icom Remote/Icom Remote"`. Needs PortAudio (`libportaudio2`).
+
+### Build it yourself
+
+PyInstaller can't cross-compile: build each OS on that OS. In the virtual
+environment:
+
+```
+python build.py
+```
+
+This installs PyInstaller, builds, runs the built app's self-check and
+writes the archive to `dist/`. `python build.py --console` (Windows) keeps a
+console window for troubleshooting.
+
+### Logs and self-check
+
+The built app has no terminal, so it writes its log to `icomremote.log` in
+its settings folder (macOS `~/Library/Application Support/IcomRemote/`,
+Windows `%APPDATA%\IcomRemote\`, Linux `~/.config/icomremote/`), replaced
+at each start. Start it with `--debug` for packet dumps.
+
+`--check` reports what the installation can do and exits (0 = OK):
+
+```
+"/Applications/Icom Remote.app/Contents/MacOS/Icom Remote" --check
+python -m icomremote --check
+```
+
+```
+Icom Remote 0.6.0, Python 3.12.8, Darwin arm64 (built app)
+  OK    Qt GUI       PySide6 6.8.1, platform 'cocoa'
+  OK    Audio        PortAudio V19.7.0-devel, 5 output / 4 input devices
+  OK    Recording    PyAV 14.0.1, AAC encoder present
+  OK    Resampler    linear (samplerate not installed; fine at 48 kHz)
+  OK    Protocol     RS-BA1 / CI-V / rigctld modules load
+RESULT: OK
+```
+
 ## Licensing
 
 GPL-3.0-or-later; see [LICENSE](LICENSE). The RS-BA1 protocol code is a port of
@@ -325,6 +384,8 @@ GPL-3.0-or-later; see [LICENSE](LICENSE). The RS-BA1 protocol code is a port of
 
 ```
 run_icomremote.py   launcher / PyInstaller entry (icomremote.spec)
+build.py            build + self-check + archive for the current OS
+.github/workflows/  tests and builds on macOS / Windows / Linux
 icomremote/
   gui.py            PySide6 main window
   session.py        connection lifecycle, control API (frequency/mode/filter), audio sinks

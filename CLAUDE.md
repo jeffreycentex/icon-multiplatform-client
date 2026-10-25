@@ -39,7 +39,7 @@ scope, CW/RTTY modes.
 | 3 | TX audio, PTT safety, DATA MOD + DATA OFF MOD switch/restore, voice PTT (armed Space), recording | verified (spots on PSKReporter; DATA MOD restore confirmed) |
 | 4 | RF power, TUNE, Output/SWR readout | TUNE + PTT verified; readout redesigned after feedback |
 | 5 | Power ON/OFF | verified on IC-7300MK2 (off, on, connect while off) |
-| 6 | PyInstaller builds (`icomremote.spec`) | not started |
+| 6 | PyInstaller builds + CI | `build.py`, spec, `--check`, GitHub Actions on macOS/Windows/Linux; awaiting first CI run and owner test of the .app |
 
 ## Spec decisions (from the owner)
 
@@ -214,6 +214,27 @@ race test (see `test_stale_reply_cannot_enable_ptt`, `test_quick_release_never_s
   import. Don't reintroduce executor use in the session loop.
 - Debug a real radio with `python -m icomremote --debug --log-file icom.log`
   or `python -m icomremote.probe --host … --debug`.
+
+## Packaging and CI
+
+- `build.py` -> PyInstaller (`icomremote.spec`) -> runs the built app with
+  `--check` -> zip (macOS via `ditto`, keeps signature/symlinks) / zip
+  (Windows) / tar.gz (Linux) in `dist/`.
+- `--check` (`__main__.check`) reports Qt, PortAudio, PyAV, resampler,
+  protocol modules; exit 0 = required parts OK. In a windowed build stdout
+  is None, so the result goes to the log file too.
+- Built app always logs to `<settings dir>/icomremote.log` (overwritten each
+  start). Ask the owner for it when the .app misbehaves.
+- macOS Info.plist needs `NSLocalNetworkUsageDescription` (macOS 15 local
+  network privacy) and `NSMicrophoneUsageDescription`; without them access is
+  silently denied. App is unsigned: right-click Open / remove quarantine.
+- `.github/workflows/build.yml`: matrix macos-latest (arm64), windows-latest,
+  ubuntu-22.04; Python 3.12; runs the **full** test suite (including GUI and
+  M4A tests, offscreen) then `build.py --no-install`; artifacts kept 30 days;
+  `v*` tags attach archives to a release. This is the only Windows/Linux
+  testing so far, and it is how Claude can see Windows results: read runs
+  with `gh api repos/jeffreycentex/icon-multiplatform-client/actions/runs`.
+- Version: `icomremote/__init__.py` `__version__` (0.6.0 = step 6).
 
 ## Audio cables
 
