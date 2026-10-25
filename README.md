@@ -220,9 +220,29 @@ then `pulseaudio -k` (it restarts by itself).
 | WSJT-X / fldigi | input | `Monitor of IcomRX` |
 | WSJT-X / fldigi | output | `IcomTX` |
 
-If a program doesn't list the PulseAudio devices by name, choose its
-`pulse` / `default` device and route the stream in `pavucontrol` (Playback /
-Recording tabs).
+**WSJT-X and JS8Call** (Qt 5) don't list PulseAudio/PipeWire devices by name:
+their lists come from ALSA, so you only see `pulse`, `default` and the
+hardware cards, never "Monitor of IcomRX". Route them in `pavucontrol`
+(`sudo apt install pavucontrol`; it also works on PipeWire):
+
+1. In WSJT-X / JS8Call → Settings → Audio, set **Input** and **Output** to
+   `pulse` (or `default` if `pulse` isn't listed).
+2. With WSJT-X running, open pavucontrol. **Recording** tab: set WSJT-X's
+   stream to **Monitor of IcomRX** (choose "Show: All streams" if it isn't
+   listed). **Playback** tab: set WSJT-X's stream to **IcomTX**.
+3. PulseAudio/PipeWire remember this per program, so it survives restarts.
+   Repeat once for JS8Call.
+
+Programs that list PulseAudio devices but hide monitor sources (some fldigi
+setups) see the receive cable as a normal input after this remap; add the
+same line to the persistence config above to keep it:
+
+```
+pactl load-module module-remap-source master=IcomRX.monitor source_name=IcomRX_in source_properties=device.description=IcomRX-Input
+```
+
+Avoid `pactl set-default-source IcomRX.monitor`: it works, but it also
+redirects every other program's microphone to the radio.
 
 ## Transmit
 
