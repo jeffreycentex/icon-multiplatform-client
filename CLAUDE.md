@@ -39,7 +39,7 @@ scope, CW/RTTY modes.
 | 3 | TX audio, PTT safety, DATA MOD + DATA OFF MOD switch/restore, voice PTT (armed Space), recording | verified (spots on PSKReporter; DATA MOD restore confirmed) |
 | 4 | RF power, TUNE, Output/SWR readout | TUNE + PTT verified; readout redesigned after feedback |
 | 5 | Power ON/OFF | verified on IC-7300MK2 (off, on, connect while off) |
-| 6 | PyInstaller builds + CI | `build.py`, spec, `--check`, GitHub Actions on macOS/Windows/Linux; awaiting first CI run and owner test of the .app |
+| 6 | PyInstaller builds + CI | CI green on Windows + Linux (tests, build, built-app self-check); macOS last timing fix pending; owner to test the .app and a Windows build on hardware |
 
 ## Spec decisions (from the owner)
 
@@ -235,6 +235,25 @@ race test (see `test_stale_reply_cannot_enable_ptt`, `test_quick_release_never_s
   testing so far, and it is how Claude can see Windows results: read runs
   with `gh api repos/jeffreycentex/icon-multiplatform-client/actions/runs`.
 - Version: `icomremote/__init__.py` `__version__` (0.6.0 = step 6).
+- Raw job logs are **not** reachable from Claude's sandbox (blob storage
+  blocked); `tests/ci_run.py` and `build.py` report results as annotations:
+  `gh api repos/jeffreycentex/icon-multiplatform-client/check-runs/<job id>/annotations`.
+
+## Lessons from Windows / CI (2026-10-24)
+
+- Windows + UDP: create sockets via `netcompat.udp_socket` (sets
+  `SIO_UDP_CONNRESET` off) and run asyncio with `netcompat.run` (selector
+  loop on every OS). The default Proactor loop lost CI-V answers and left
+  transports half-closed.
+- `time.monotonic()` has 15.6 ms resolution on Windows: use
+  `time.perf_counter()` for short intervals (RTT).
+- Menu reads (`_read_menu`) accept only the matching answer; stray NGs
+  (standby probes) must not satisfy them.
+- rigctl `m` right after `M` reports the filter's nominal width until the
+  radio's 1A 03 answer arrives (never 0).
+- Tests on CI: never assume `sleep()` is accurate; fake sources follow
+  wall-clock time; always `wait_for` a second dependent condition; tear Qt
+  down in `tearDownModule` (otherwise crash at interpreter exit on all OSes).
 
 ## Audio cables
 

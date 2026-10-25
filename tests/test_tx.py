@@ -218,10 +218,10 @@ class TestPtt(_TxBase):
         self.assertEqual(self.radio.tx_audio_while_rx, 0)           # nothing sent while not keyed
         self.session.set_ptt(True)
         self.assertTrue(wait_for(lambda: self.radio.ptt and self.session.tx))
-        n0 = len(self.radio.tx_audio)
-        time.sleep(1.0)
-        got = len(self.radio.tx_audio) - n0
-        self.assertAlmostEqual(got / 96000.0, 1.0, delta=0.15)      # ~1 s of 48 kHz 16-bit audio
+        n0, t0 = len(self.radio.tx_audio), time.perf_counter()
+        time.sleep(1.0)                                              # CI machines may oversleep:
+        got, dt = len(self.radio.tx_audio) - n0, time.perf_counter() - t0   # compare with real time
+        self.assertAlmostEqual(got / 96000.0, dt, delta=0.15)       # 48 kHz 16-bit audio in real time
         self.session.set_ptt(False)
         self.assertTrue(wait_for(lambda: not self.radio.ptt and not self.session.tx))
         time.sleep(0.3)
