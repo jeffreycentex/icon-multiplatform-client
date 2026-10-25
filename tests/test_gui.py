@@ -113,10 +113,13 @@ class TestGui(unittest.TestCase):
         w.ptt_btn.click()
         self.assertTrue(self.pump_until(lambda: self.radio.ptt and w.tx_indicator.text() == "TX"))
         self.assertTrue(self.pump_until(lambda: w.tx_level.value() > 0))
-        self.assertTrue(self.pump_until(lambda: "SWR 1.5" in w.smeter.format()))     # Po/SWR on TX
+        self.assertTrue(self.pump_until(lambda: "SWR 1.5" in w.txmeter_label.text()))  # Po/SWR on TX
+        self.assertIn("Output", w.txmeter_label.text())
+        self.assertIn("#f1c40f", w.swr_dot.styleSheet())                              # 1.5: yellow
         w.ptt_btn.click()
         self.assertTrue(self.pump_until(lambda: not self.radio.ptt and w.tx_indicator.text() == "RX"))
-        self.assertTrue(self.pump_until(lambda: w.smeter.format().startswith("S")))   # back to S-meter
+        self.assertTrue(self.pump_until(lambda: "#9e9e9e" in w.swr_dot.styleSheet()))  # grey on RX
+        self.assertIn("SWR 1.5", w.txmeter_label.text())                              # last reading kept
 
         # ---- RF power and TUNE
         self.assertTrue(self.pump_until(lambda: w.rf_power_label.text() == "50 %"))  # 128/255 from the radio

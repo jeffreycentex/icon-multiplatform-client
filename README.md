@@ -74,9 +74,12 @@ Enter the radio's address, user name and password, and click **Connect**.
 - **Mode**: LSB, USB, AM, FM, plus **DATA** for the data variants (USB-D …).
 - **Filter**: FIL1/FIL2/FIL3, with the selected filter's passband shown next
   to them.
-- **Meter**: the S-meter while receiving; **Po** (percent of full power) and
-  **SWR** while the radio transmits or tunes, updated four times a second. The
-  bar turns red at SWR 2.5 or higher.
+- **S-meter**: the bar in the Radio box.
+- **Output / SWR** (next to the PTT timeout): measured while the radio
+  transmits or tunes, four times a second; the last reading stays shown
+  afterwards. Output is the percent of full power. The dot is green below
+  SWR 1.5, yellow below 2.5, red at 2.5 or higher, and grey when not
+  transmitting.
 - **Receive audio output**: pick the virtual cable (or speakers) and tick
   *Play to*.
 

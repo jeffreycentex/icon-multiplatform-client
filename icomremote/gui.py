@@ -26,7 +26,8 @@ log = logging.getLogger(__name__)
 
 STEPS_HZ = [10, 100, 500, 1000, 5000, 9000, 10000, 100000]
 S_MAX_RAW = 241          # S9+60 dB
-SWR_WARN = 2.5
+SWR_YELLOW = 1.5
+SWR_RED = 2.5
 
 
 class _Bridge(QObject):
@@ -47,7 +48,7 @@ class MainWindow(QMainWindow):
         self._rec_started = None
         self._space_owner = object()     # identifies space-bar keying to the session
         self._space_down = False
-        self._on_air = False             # radio transmitting or tuning: meter shows Po/SWR
+        self._on_air = False             # radio transmitting or tuning: Po/SWR readout is live
         self._po = self._swr = None
 
         central = QWidget()
@@ -124,7 +125,7 @@ class MainWindow(QMainWindow):
         g.addWidget(self.remember_pw, 2, 2, 1, 2)
         g.addWidget(self.conn_label, 3, 0, 1, 4)
         g.addWidget(self.info_label, 4, 0, 1, 4)
-        g.addWidget(QLabel("Meter"), 5, 0)
+        g.addWidget(QLabel("S-meter"), 5, 0)
         g.addWidget(self.smeter, 5, 1, 1, 3)
         g.setColumnStretch(1, 1)
         return box
@@ -340,9 +341,20 @@ class MainWindow(QMainWindow):
         prow.addWidget(self.tune_btn)
         prow.addWidget(self.tuner_label)
         g.addLayout(prow, 5, 0, 1, 5)
+        self.txmeter_label = QLabel("Output —   SWR —")
+        self.txmeter_label.setToolTip("Measured while transmitting or tuning; the last reading stays\n"
+                                      "shown afterwards. Output = percent of full power.")
+        self.swr_dot = QLabel()
+        self.swr_dot.setFixedSize(14, 14)
+        self.swr_dot.setToolTip("SWR: green < %.1f, yellow < %.1f, red ≥ %.1f; grey = not transmitting"
+                                % (SWR_YELLOW, SWR_RED, SWR_RED))
+        self._style_swr_dot(None)
         trow = QHBoxLayout()
         trow.addWidget(QLabel("PTT timeout"))
         trow.addWidget(self.ptt_timeout)
+        trow.addSpacing(16)
+        trow.addWidget(self.txmeter_label)
+        trow.addWidget(self.swr_dot)
         trow.addStretch(1)
         g.addLayout(trow, 6, 0, 1, 5)
         if sys.platform.startswith("linux") and shutil.which("pactl"):
@@ -739,27 +751,29 @@ class MainWindow(QMainWindow):
         if on == self._on_air:
             return
         self._on_air = on
-        self._po = self._swr = None
         if on:
-            self.smeter.setRange(0, 100)
-            self.smeter.setValue(0)
-            self.smeter.setFormat("Po —")
+            self._po = self._swr = None
+            self._show_tx_meter()
         else:
-            self.smeter.setRange(0, S_MAX_RAW)
-            self.smeter.setValue(0)
-            self.smeter.setFormat("—")
-            self.smeter.setStyleSheet("")
+            self._style_swr_dot(None)         # keep the last numbers, grey dot
+
+    def _style_swr_dot(self, swr):
+        if swr is None:
+            color = "#9e9e9e"
+        elif swr < SWR_YELLOW:
+            color = "#2e7d32"
+        elif swr < SWR_RED:
+            color = "#f1c40f"
+        else:
+            color = "#c0392b"
+        self.swr_dot.setStyleSheet("background: %s; border-radius: 7px;" % color)
 
     def _show_tx_meter(self):
         po = civ.po_percent(self._po) if self._po is not None else None
         swr = civ.swr(self._swr) if self._swr is not None else None
-        self.smeter.setValue(int(round(po)) if po is not None else 0)
-        text = "Po %s" % ("%.0f %%" % po if po is not None else "—")
-        if swr is not None:
-            text += "   SWR %.1f" % swr
-        self.smeter.setFormat(text)
-        high = swr is not None and swr >= SWR_WARN
-        self.smeter.setStyleSheet("QProgressBar::chunk { background: #c0392b; }" if high else "")
+        self.txmeter_label.setText("Output %s   SWR %s" % ("%.0f %%" % po if po is not None else "—",
+                                                           "%.1f" % swr if swr is not None else "—"))
+        self._style_swr_dot(swr if self._on_air else None)
 
     def _style_arm(self, armed):
         self.voice_arm.setStyleSheet("background: #e67e22; color: white; font-weight: bold" if armed else "")
@@ -851,7 +865,7 @@ class MainWindow(QMainWindow):
             self._show_rig(payload)
         elif kind == "meter":
             name, raw = payload
-            if name == "smeter" and not self._on_air:
+            if name == "smeter":
                 db = civ.s_meter_db(raw)
                 self.smeter.setValue(min(raw, S_MAX_RAW))
                 self.smeter.setFormat(civ.s_meter_text(db))
@@ -892,6 +906,7 @@ class MainWindow(QMainWindow):
                 self.ptt_btn.setChecked(False)
                 self._style_tx(False)
                 self._set_on_air(False)
+                self.txmeter_label.setText("Output —   SWR —")
                 self.rf_power_label.setText("—")
                 self.tuner_label.setText("Tuner: —")
                 self.restore_btn.setEnabled(False)
