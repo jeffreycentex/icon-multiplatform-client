@@ -252,6 +252,23 @@ class TestPtt(_TxBase):
         time.sleep(0.5)
         self.assertFalse(any(on for _, on in self.radio.ptt_log), "radio was keyed in plain USB")
 
+    def test_key_right_after_switching_to_data(self):
+        """Regression (Windows CI): a poll reply sent while still in a voice mode
+        answered the pre-key DATA check, and PTT was refused right after
+        switching to USB-D."""
+        self._ready_for_tx()
+        from icomremote import civ as C
+        for _ in range(15):
+            self.session.set_mode("LSB", False)
+            self.assertTrue(wait_for(lambda: not self.radio.data))
+            self.session._loop.call_soon_threadsafe(self.session._tx_civ, C.read_data_mode(0xB6))  # poll
+            self.session.set_mode("USB", True)
+            self.session.set_ptt(True)                     # immediately, like a fast click
+            self.assertTrue(wait_for(lambda: self.radio.ptt, 3), "PTT was refused after USB-D")
+            self.session.set_ptt(False)
+            self.assertTrue(wait_for(lambda: not self.radio.ptt))
+        self.assertFalse(any("PTT refused" in t for t in self.statuses()))
+
     def test_radio_confirms_data_before_keying(self):
         self._ready_for_tx()
         self.radio.data = False          # changed on the radio; the app hasn't polled yet

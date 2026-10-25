@@ -468,11 +468,13 @@ class RadioSession:
             if self.power == "standby" and self._mods_ready is not None:
                 self._loop.create_task(self._woke_up())
         for kind, value in events:
+            if kind == "reply":
+                self._replies[value] += 1          # count first: _civ_ask waiters check it
             for match, fut in list(self._civ_waiters):
                 if not fut.done() and match(kind, value):
                     fut.set_result((kind, value))
             if kind == "reply":
-                self._replies[value] += 1
+                pass
             elif kind in ("freq", "mode"):
                 st = self._fenced_state(dec.state)
                 with self._rig_lock:
@@ -530,12 +532,26 @@ class RadioSession:
 
     async def _civ_ask(self, frame, match, timeout=CIV_ANSWER_TIMEOUT, attempts=2):
         """Send a CI-V frame and wait for the first decoded event match(kind, value)
-        accepts. Returns (kind, value) or None. Loop thread only."""
+        accepts. Returns (kind, value) or None. Loop thread only.
+
+        For a state read (03, 04, 1A 06, 1A 03) only the answer to *this* read
+        counts: a reply to an earlier read still in flight (e.g. a poll sent
+        before a mode change) is skipped by counting replies."""
+        group = civ.read_group(frame)
         for _ in range(attempts):
             if self._serial is None or self._serial.closed:
                 return None
             fut = self._loop.create_future()
-            entry = (match, fut)
+            if group is None:
+                own = match
+            else:
+                target = self._reads_sent[group] + 1          # this read's reply number
+
+                def own(k, v, _m=match, _g=group, _t=target):
+                    if k == "reply" and v == _g and self._replies[_g] < _t:
+                        return False                          # answer to an older read
+                    return _m(k, v)
+            entry = (own, fut)
             self._civ_waiters.append(entry)
             try:
                 self._tx_civ(frame)

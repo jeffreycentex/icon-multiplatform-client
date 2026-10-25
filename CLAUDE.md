@@ -211,6 +211,11 @@ Scales: S-meter 0=S0, 120=S9, 241=S9+60. Po 143=50 %, 213=100 %. SWR 48=1.5,
   `_ptt_lock`; only the newest applies; automatic unkeys go through
   `_unkey()`, which also bumps the sequence.
 
+- **Waiting for an answer**: `_civ_ask` on a state read accepts only the
+  reply to *its own* read (reply counters), not an older poll's reply still in
+  flight. Without this, PTT right after switching to USB-D was refused
+  (Windows CI, `test_key_right_after_switching_to_data`).
+
 Any new feature that changes radio state or keys the transmitter needs a
 race test (see `test_stale_reply_cannot_enable_ptt`, `test_quick_release_never_sticks`).
 
