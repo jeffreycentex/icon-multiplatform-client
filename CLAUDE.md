@@ -39,7 +39,7 @@ scope, CW/RTTY modes.
 | 3 | TX audio, PTT safety, DATA MOD + DATA OFF MOD switch/restore, voice PTT (armed Space), recording | verified (spots on PSKReporter; DATA MOD restore confirmed) |
 | 4 | RF power, TUNE, Output/SWR readout | TUNE + PTT verified; readout redesigned after feedback |
 | 5 | Power ON/OFF | verified on IC-7300MK2 (off, on, connect while off) |
-| 6 | PyInstaller builds + CI | CI green on Windows + Linux (tests, build, built-app self-check); macOS last timing fix pending; owner to test the .app and a Windows build on hardware |
+| 6 | PyInstaller builds + CI | CI green on macOS, Windows, Linux (100 tests incl. GUI, build, built-app self-check); owner to test the .app and a Windows build on hardware |
 
 ## Spec decisions (from the owner)
 
