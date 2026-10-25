@@ -47,6 +47,9 @@ class TestGui(unittest.TestCase):
     def tearDown(self):
         self.w.close()
         self.radio.stop()
+        self.w.deleteLater()                 # destroy Qt objects now, not at interpreter exit
+        self.pump_until(lambda: False, 0.2)
+        self.w = None
 
     def pump_until(self, pred, timeout=8.0):
         end = time.time() + timeout
@@ -77,7 +80,7 @@ class TestGui(unittest.TestCase):
 
         w.mode_buttons["LSB"].click()
         self.assertTrue(self.pump_until(lambda: self.radio.mode == 0x00 and self.radio.data))
-        self.assertTrue(w.mode_buttons["LSB"].isChecked())
+        self.assertTrue(self.pump_until(lambda: w.mode_buttons["LSB"].isChecked()))
 
         w.filter_buttons[2].click()
         self.assertTrue(self.pump_until(lambda: self.radio.filt == 2 and w.width_label.text() == "2.4 kHz"))
@@ -204,6 +207,21 @@ class TestGui(unittest.TestCase):
         self.assertTrue(self.pump_until(lambda: w.connect_btn.text() == "Connect"))
         self.assertFalse(w.voice_arm.isChecked())
         self.assertEqual(self.radio.menu[b"\x00\x84"], 0x00)     # DATA OFF MOD back to MIC
+
+
+def tearDownModule():
+    """Shut Qt down before Python finalizes: on CI (all three OSes) the test
+    process crashed at exit after all tests passed when Qt objects were left
+    for interpreter teardown."""
+    if not HAVE_QT:
+        return
+    import gc
+    app = QApplication.instance()
+    if app is not None:
+        app.closeAllWindows()
+        app.processEvents()
+        app.quit()
+    gc.collect()
 
 
 if __name__ == "__main__":

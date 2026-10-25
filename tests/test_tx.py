@@ -41,11 +41,16 @@ class FakeSource:
         threading.Thread(target=self._run, daemon=True).start()
 
     def _run(self):
+        # Like a sound card: samples follow wall-clock time, whatever sleep() does
+        # (CI machines can oversleep a lot).
+        t0 = time.perf_counter()
         while not self._stop.is_set():
-            t = (np.arange(882) + self._phase) / 44100.0          # 20 ms blocks
-            self._phase += 882
-            self.framer.push((0.5 * np.sin(2 * np.pi * self.tone * t)).astype(np.float32))
-            time.sleep(0.02)
+            due = int((time.perf_counter() - t0) * 44100) - self._phase
+            if due > 0:
+                t = (np.arange(due) + self._phase) / 44100.0
+                self._phase += due
+                self.framer.push((0.5 * np.sin(2 * np.pi * self.tone * t)).astype(np.float32))
+            time.sleep(0.01)
 
     def start(self):
         self.framer.start()
@@ -161,7 +166,7 @@ class TestDataMod(_TxBase):
         self.assertTrue(wait_for(lambda: self.session.data_mod == LAN))
         self.session.restore_data_mod_now()
         self.assertTrue(wait_for(lambda: self.radio.menu[b"\x00\x85"] == USB and self.session.data_mod == USB))
-        self.assertEqual(self.pending(), {})
+        self.assertTrue(wait_for(lambda: self.pending() == {}))          # DATA OFF MOD is restored second
         self.session.set_tx_device("fake")
         self.session.set_mode("USB", True)
         self.assertTrue(wait_for(lambda: self.session.rig.data and self.session._tx_source))

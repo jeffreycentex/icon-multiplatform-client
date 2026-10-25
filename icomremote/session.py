@@ -23,7 +23,7 @@ from typing import Optional
 
 import numpy as np
 
-from . import civ
+from . import civ, netcompat
 from .restore import RestoreStore
 from .state import freq_limits
 from .rsba1.stream import StreamError
@@ -211,7 +211,7 @@ class RadioSession:
 
     def _thread_main(self, ready):
         with high_resolution_timer():
-            asyncio.run(self._main(ready))
+            netcompat.run(self._main(ready))
 
     async def _main(self, ready):
         self._loop = asyncio.get_running_loop()
@@ -548,8 +548,10 @@ class RadioSession:
         return None
 
     async def _read_menu(self, item):
+        # Only the matching answer counts: a late NG (e.g. to a probe sent while
+        # the radio was in standby) must not be taken for this read's answer.
         r = await self._civ_ask(civ.read_menu(self.civ_address, item),
-                                lambda k, v: (k == "menu" and v[0] == item) or (k == "ack" and v is False))
+                                lambda k, v: k == "menu" and v[0] == item)
         if r is None or r[0] != "menu" or not r[1][1]:
             return None
         return civ.bcd_value(r[1][1][0]) if len(r[1][1]) == 1 else civ.decode_level(r[1][1][:2])

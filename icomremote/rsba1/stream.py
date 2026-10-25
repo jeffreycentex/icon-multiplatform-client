@@ -18,6 +18,7 @@ import os
 import socket
 import time
 
+from ..netcompat import udp_socket
 from . import packets as P
 
 log = logging.getLogger(__name__)
@@ -90,8 +91,8 @@ class UdpStream(asyncio.DatagramProtocol):
             raise StreamError("cannot resolve %s" % self.host)
         addr = infos[0][4]
         try:
-            await self._loop.create_datagram_endpoint(
-                lambda: self, local_addr=("0.0.0.0", self.local_port), remote_addr=addr)
+            sock = udp_socket(self.local_port, addr)
+            await self._loop.create_datagram_endpoint(lambda: self, sock=sock)
         except OSError as e:
             if self.local_port and e.errno in (48, 98, 10048):     # EADDRINUSE mac/linux/windows
                 raise StreamError("%s: local UDP port %d is in use (another RS-BA1 client running? "
@@ -228,7 +229,7 @@ class UdpStream(asyncio.DatagramProtocol):
     def send_ping(self):
         pid = bytes([os.urandom(1)[0], self._ping_inner & 0xFF, (self._ping_inner >> 8) & 0xFF, 0x06])
         self._ping_inner = (self._ping_inner + 1) & 0xFFFF
-        self._ping_sent[pid] = time.monotonic()
+        self._ping_sent[pid] = time.perf_counter()       # monotonic() is 15.6 ms coarse on Windows
         if len(self._ping_sent) > 20:
             self._ping_sent.pop(next(iter(self._ping_sent)))
         self.send_raw(P.ping(self._ping_seq, self.local_sid, self.remote_sid, False, pid))
@@ -271,7 +272,7 @@ class UdpStream(asyncio.DatagramProtocol):
         else:
             sent = self._ping_sent.pop(bytes(d[17:21]), None)
             if sent is not None:
-                sample = time.monotonic() - sent
+                sample = time.perf_counter() - sent
                 self.rtt = sample if self.rtt == 0 else (self.rtt + sample) / 2
 
     def _serve_retransmit(self, ranges):

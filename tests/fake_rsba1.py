@@ -12,7 +12,9 @@ Byte layouts mirror the radio captures documented in kappanhang.
 
 import asyncio
 import os
+import socket
 import struct
+import sys
 import threading
 import time
 
@@ -156,13 +158,21 @@ class FakeRadio:
         return self
 
     def _run(self, ready):
-        self._loop = asyncio.new_event_loop()
+        self._loop = asyncio.SelectorEventLoop()        # same loop type as the app, on every OS
         asyncio.set_event_loop(self._loop)
 
         async def setup():
             for name in ("control", "serial", "audio"):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                if sys.platform == "win32":
+                    try:
+                        sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+                    except (AttributeError, OSError):
+                        pass
+                sock.bind(("127.0.0.1", 0))
+                sock.setblocking(False)
                 tr, proto = await self._loop.create_datagram_endpoint(
-                    lambda n=name: _Port(self, n), local_addr=("127.0.0.1", 0))
+                    lambda n=name: _Port(self, n), sock=sock)
                 setattr(self, name, proto)
                 self.ports[name] = tr.get_extra_info("sockname")[1]
             self._tasks.append(self._loop.create_task(self._audio_loop()))
