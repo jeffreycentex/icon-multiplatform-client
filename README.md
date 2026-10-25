@@ -1,10 +1,8 @@
 # Icom Remote (multiplatform RS-BA1 client)
 
 A cross-platform (Windows / macOS / Linux) desktop client for Icom's RS-BA1 LAN
-remote protocol, built for the IC-7300MK2. It should also work with the
-radios kappanhang supports (IC-705, IC-9700, IC-7610, IC-785x). It talks to
-the radio's built-in network server directly; no RS-BA1 software or shack PC
-is needed. The design follows
+remote protocol, built for the IC-7300MK2. It talks to the radio's built-in
+network server directly; no RS-BA1 software or shack PC is needed. The design follows
 [kiwisdr-remote](https://github.com/jeffreycentex/kiwisdr-remote).
 
 ```
@@ -24,7 +22,24 @@ IC-7300MK2 ◄udp─┤ session thread (asyncio): control / serial / audio  │
 | 3 | TX audio (data and voice), PTT with safety rules, DATA MOD / DATA OFF MOD switch and restore, recording | done, verified on an IC-7300MK2 |
 | 4 | Output/SWR readout, RF power, TUNE | done, verified on an IC-7300MK2 |
 | 5 | Power ON/OFF | done, verified on an IC-7300MK2 |
-| 6 | Standalone builds (PyInstaller), CI on macOS / Windows / Linux | **this release** |
+| 6 | Standalone builds (PyInstaller), CI on macOS / Windows / Linux | done |
+| 0.9 | IC-9700 and IC-7610 profiles, per-model DATA MOD tables | **this release** |
+
+## Supported radios
+
+| Radio | CI-V | Profile | DATA MOD switching | TUNE | Tested |
+|---|---|---|---|---|---|
+| IC-7300MK2 | B6h | yes | yes (`1A 05 00 85` / `00 84`) | yes | **on the radio** |
+| IC-705 | A4h | yes | yes (`1A 05 01 19` / `01 18`, LAN = WLAN `03`) | yes (external tuner) | fake radio only |
+| IC-9700 | A2h | yes | yes (`1A 05 01 16` / `01 15`) | no (the radio has no tuner command) | fake radio only |
+| IC-7610 | 98h | yes | no: set DATA MOD / DATA OFF MOD to LAN on the radio | yes | fake radio only |
+
+Menu item numbers come from each radio's Icom CI-V reference guide. They
+differ between models (including the order of the MIC/USB/ACC values), which
+is why the app only writes to radios whose table it has. The IC-7610's items
+are not in the app yet: it never writes them. Other radios supported by the
+RS-BA1 protocol (IC-785x, IC-7760 …) may connect with *Auto*, but nothing
+beyond receive and basic CAT is expected.
 
 
 ## Install
@@ -61,12 +76,14 @@ have not verified the menu path on the IC-7300MK2.
 ## Run
 
 ```
-python -m icomremote            # add --debug --log-file icom.log for a packet log
+python run_icomremote.py                              # in the virtual environment
+python run_icomremote.py --debug --log-file icom.log  # with a packet log
 ```
 
 Enter the radio's address, user name and password, and click **Connect**.
 **Radio** selects the CI-V address: *Auto* uses the address the radio reports
-(B6h on the IC-7300MK2); the IC-705 profile forces A4h.
+(recommended); the model profiles (IC-7300MK2 B6h, IC-705 A4h, IC-9700 A2h,
+IC-7610 98h) force that address.
 
 - **Frequency**: type a value in kHz and press Enter, or use the arrows /
   mouse wheel with the chosen step. Changes made on the radio show up within a
@@ -110,9 +127,10 @@ simply your microphone.
 - **Windows:** VB-CABLE gives one cable; add VB-CABLE A+B (two more) or
   Hi-Fi Cable from the same site. All are donationware.
 - **macOS:** BlackHole 2ch and BlackHole 16ch install as two separate devices.
-- **Linux:** nothing to install. The app's buttons create two PulseAudio /
-  PipeWire null sinks (IcomRX, IcomTX); each sink's "Monitor of …" source is
-  the other end of that cable.
+- **Linux:** no driver to install. Two PulseAudio / PipeWire *null sinks*
+  (IcomRX, IcomTX) act as the cables; each sink's "Monitor of …" source is
+  the other end. See [Linux audio setup](#linux-audio-setup-pulseaudio--pipewire)
+  for the packages and for making the sinks permanent.
 
 | Direction | Windows | macOS | Linux |
 |---|---|---|---|
@@ -126,6 +144,85 @@ macOS: the first time the app reads an input device, macOS asks for
 microphone permission for the program running it (Terminal, or the app
 bundle). If it was denied, the transmit level stays at zero: enable it in
 System Settings → Privacy & Security → Microphone.
+
+### Linux audio setup (PulseAudio / PipeWire)
+
+Not yet tested on a real Linux desktop; the steps are standard
+PulseAudio/PipeWire usage.
+
+**1. Which sound server?**
+
+```
+pactl info | grep "Server Name"
+```
+
+`PulseAudio (on PipeWire …)` means PipeWire (Ubuntu 22.10+, Fedora 34+,
+Debian 12 desktop …); plain `pulseaudio` means PulseAudio. If `pactl` is
+missing, install the tools below.
+
+**2. Packages.** PortAudio (used by the app), `pactl`, and the ALSA "pulse"
+plugin, which lets the app pick a specific sink:
+
+```
+# Debian / Ubuntu / Raspberry Pi OS
+sudo apt install libportaudio2 pulseaudio-utils libasound2-plugins
+# Fedora
+sudo dnf install portaudio pulseaudio-utils alsa-plugins-pulseaudio
+# Arch
+sudo pacman -S portaudio libpulse alsa-plugins
+```
+
+On PipeWire systems also make sure `pipewire-pulse` is installed (it usually
+is); it provides the PulseAudio interface the app and `pactl` use.
+
+**3. Create the two cables.** Either click **Create 'IcomRX' virtual sink**
+(receive box) and **Create 'IcomTX' virtual sink** (transmit box) in the
+app, or run:
+
+```
+pactl load-module module-null-sink sink_name=IcomRX sink_properties=device.description=IcomRX
+pactl load-module module-null-sink sink_name=IcomTX sink_properties=device.description=IcomTX
+pactl list short sinks | grep Icom          # both should be listed
+```
+
+These last until you log out or the sound server restarts.
+
+**4. Make them permanent.**
+
+PipeWire: create `~/.config/pipewire/pipewire-pulse.conf.d/icomremote.conf`:
+
+```
+pulse.cmd = [
+  { cmd = "load-module" args = "module-null-sink sink_name=IcomRX sink_properties=device.description=IcomRX" flags = [ ] }
+  { cmd = "load-module" args = "module-null-sink sink_name=IcomTX sink_properties=device.description=IcomTX" flags = [ ] }
+]
+```
+
+then `systemctl --user restart pipewire-pulse` (or log out and in).
+
+PulseAudio: add to `~/.config/pulse/default.pa` (create it if missing; the
+`.include` line keeps the system defaults):
+
+```
+.include /etc/pulse/default.pa
+load-module module-null-sink sink_name=IcomRX sink_properties=device.description=IcomRX
+load-module module-null-sink sink_name=IcomTX sink_properties=device.description=IcomTX
+```
+
+then `pulseaudio -k` (it restarts by itself).
+
+**5. Connect them.**
+
+| Program | Setting | Device |
+|---|---|---|
+| Icom Remote | *Play to* (receive) | `PulseAudio/PipeWire sink: IcomRX` |
+| Icom Remote | *Audio from* (transmit) | `PulseAudio/PipeWire source: IcomTX.monitor` |
+| WSJT-X / fldigi | input | `Monitor of IcomRX` |
+| WSJT-X / fldigi | output | `IcomTX` |
+
+If a program doesn't list the PulseAudio devices by name, choose its
+`pulse` / `default` device and route the stream in `pavucontrol` (Playback /
+Recording tabs).
 
 ## Transmit
 
@@ -224,9 +321,10 @@ Connectors → MOD Input → DATA MOD).
 On connect the app also warns if *LAN MOD Level* is 0 %, which would make
 transmit silent.
 
-Switching is implemented for the IC-7300MK2 (CI-V `1A 05 00 85` DATA MOD,
-`1A 05 00 84` DATA OFF MOD, from Icom's CI-V reference). For other models the app reports that it doesn't
-know the setting; set DATA MOD to LAN on the radio yourself.
+Switching is implemented for the IC-7300MK2, IC-705 and IC-9700 (see
+[Supported radios](#supported-radios)). For the IC-7610 and other models the
+app reports that it doesn't know the setting; set DATA MOD and DATA OFF MOD
+to LAN on the radio yourself.
 
 ## rigctld (CAT control)
 
@@ -319,11 +417,17 @@ IC-7300MK2. Covered:
 
 ### Download a build
 
-Every push to `main` is tested and built on macOS, Windows and Linux by
-GitHub Actions. Open the repository's **Actions** tab → latest
-*test-and-build* run → **Artifacts**, and download `IcomRemote-macOS`,
-`IcomRemote-Windows` or `IcomRemote-Linux`. Tagged versions (`v0.6.0` …) also
-appear under **Releases**.
+> **Unsigned code.** The builds are not signed with an Apple Developer ID or a
+> Windows code-signing certificate. macOS and Windows will warn that the
+> developer can't be verified, and you have to approve the first launch
+> yourself (steps below). Only do that for a build you downloaded from this
+> repository's own Releases or Actions pages. If in doubt, run from source
+> instead (see [Install](#install)); it's the same code.
+
+Tagged versions (`v0.9` …) are under **Releases**, with a zip per OS. Every
+push to `main` is also tested and built by GitHub Actions: **Actions** tab →
+latest *test-and-build* run → **Artifacts** (`IcomRemote-macOS`,
+`IcomRemote-Windows`, `IcomRemote-Linux`; kept 30 days).
 
 - **macOS**: unzip and move *Icom Remote.app* to Applications. The app is not
   signed by Apple, so macOS blocks the first launch. On macOS 15 and later:
@@ -364,7 +468,7 @@ at each start. Start it with `--debug` for packet dumps.
 
 ```
 "/Applications/Icom Remote.app/Contents/MacOS/Icom Remote" --check
-python -m icomremote --check
+python run_icomremote.py --check
 ```
 
 ```

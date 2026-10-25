@@ -52,8 +52,8 @@ RF_POWER_HOLD = 1.5
 STATS_INTERVAL = 1.0
 DEFAULT_PTT_TIMEOUT = 180.0
 # Menu settings the app switches to LAN while connected: key -> (label, item table)
-MOD_SETTINGS = {"data_mod": ("DATA MOD", civ.DATA_MOD_ITEM),
-                "data_off_mod": ("DATA OFF MOD", civ.DATA_OFF_MOD_ITEM)}
+MOD_SETTINGS = {"data_mod": ("DATA MOD", "data_mod"),        # label, key in civ.MODELS
+                "data_off_mod": ("DATA OFF MOD", "data_off_mod")}
 FENCE_SECONDS = 1.5
 CIV_ANSWER_TIMEOUT = 1.0
 
@@ -681,8 +681,8 @@ class RadioSession:
             return "no transmit audio input selected"
         setting = "data_mod" if kind == "data" else "data_off_mod"
         v = self.mods[setting]["value"]
-        if v is not None and v != civ.DATA_MOD_LAN:
-            return "%s is %s, not LAN" % (MOD_SETTINGS[setting][0], civ.DATA_MOD_NAMES.get(v, v))
+        if v is not None and v != self._lan:
+            return "%s is %s, not LAN" % (MOD_SETTINGS[setting][0], self._mod_name(v))
         return None
 
     def ptt_refusal(self, voice_ok=False):
@@ -820,7 +820,7 @@ class RadioSession:
         for f in (civ.read_mode(a), civ.read_data_mode(a), civ.read_if_width(a), civ.read_ptt(a),
                   civ.read_rf_power(a), civ.read_tuner(a)):
             self._tx_civ(f)
-        item = civ.REMOTE_POWER_ITEM.get(radio_name)
+        item = civ.model_info(radio_name).get("remote_power")
         if item is not None:
             v = await self._read_menu(item)
             if v is not None and v != self.remote_power_setting:
@@ -889,6 +889,8 @@ class RadioSession:
     def tune(self):
         """Thread-safe: run the internal antenna tuner's tune cycle (like the TUNER button)."""
         self._require_on()
+        if not civ.has_tuner(self._model):
+            raise PttRefused("TUNE: the %s has no antenna tuner command" % self._model)
         if self.ptt or self._keyed:
             raise PttRefused("TUNE refused: transmitting")
         if self._tuning:
@@ -1025,16 +1027,28 @@ class RadioSession:
             self._audio.send_frame(pcm)
 
     # ------------------------------------------------------------------ DATA MOD / DATA OFF MOD
+    @property
+    def _model(self):
+        return self.info.radio_name if self.info else None
+
+    @property
+    def _lan(self):
+        return civ.lan_value(self._model)
+
+    def _mod_name(self, v):
+        return civ.mod_name(self._model, v)
+
     def _radio_key(self, radio_name, host):
         return "%s@%s" % (radio_name, host)
 
     async def _setup_mods(self, radio_name, host):
         """Switch DATA MOD and DATA OFF MOD to LAN, remembering originals on disk first."""
         key = self._radio_key(radio_name, host)
-        for setting, (label, table) in MOD_SETTINGS.items():
-            await self._setup_mod(setting, label, table.get(radio_name), radio_name, key)
+        info = civ.model_info(radio_name)
+        for setting, (label, item_key) in MOD_SETTINGS.items():
+            await self._setup_mod(setting, label, info.get(item_key), radio_name, key)
         self._emit_mods()
-        lvl_item = civ.LAN_MOD_LEVEL_ITEM.get(radio_name)
+        lvl_item = info.get("lan_mod_level")
         if lvl_item is not None:
             lvl = await self._read_menu(lvl_item)
             if lvl == 0:
@@ -1056,18 +1070,18 @@ class RadioSession:
         pending = self._store.get(key, setting)
         if pending is not None and pending != cur:
             self._status("A previous session left %s changed; it will be restored to %s"
-                         % (label, civ.DATA_MOD_NAMES.get(pending, pending)))
+                         % (label, self._mod_name(pending)))
         original = pending if pending is not None else cur
-        if m["manage"] and cur != civ.DATA_MOD_LAN:
+        if m["manage"] and cur != self._lan:
             self._store.put(key, setting, original)          # on disk before touching the radio
             m["original"] = original
-            if await self._write_menu(item, civ.DATA_MOD_LAN):
-                m["value"] = civ.DATA_MOD_LAN
+            if await self._write_menu(item, self._lan):
+                m["value"] = self._lan
                 self._status("%s switched from %s to LAN (restored when you disconnect)"
-                             % (label, civ.DATA_MOD_NAMES.get(original, original)))
+                             % (label, self._mod_name(original)))
             else:
                 self._status("Could not switch %s to LAN" % label, "error")
-        elif original != civ.DATA_MOD_LAN:
+        elif original != self._lan:
             m["original"] = original                         # pending from an earlier session
         elif pending is not None:
             self._store.clear(key, setting)                  # original was LAN: nothing to do
@@ -1077,7 +1091,8 @@ class RadioSession:
         for setting, (label, _) in MOD_SETTINGS.items():
             m = self.mods[setting]
             out[setting] = {"label": label, "value": m["value"], "original": m["original"],
-                            "name": civ.DATA_MOD_NAMES.get(m["value"], "?") if m["value"] is not None else None}
+                            "original_name": self._mod_name(m["original"]) if m["original"] is not None else None,
+                            "name": self._mod_name(m["value"]) if m["value"] is not None else None}
         self._emit("data_mod", out)
 
     async def _restore_mods(self):
@@ -1091,11 +1106,11 @@ class RadioSession:
                 self._store.clear(m["key"], setting)
                 m["original"] = None
                 m["value"] = orig
-                self._status("%s restored to %s" % (label, civ.DATA_MOD_NAMES.get(orig, orig)))
+                self._status("%s restored to %s" % (label, self._mod_name(orig)))
             else:
                 ok = False
                 self._status("Could not restore %s to %s; it will be restored at the next connection"
-                             % (label, civ.DATA_MOD_NAMES.get(orig, orig)), "error")
+                             % (label, self._mod_name(orig)), "error")
         self._emit_mods()
         return ok
 

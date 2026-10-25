@@ -535,6 +535,9 @@ class MainWindow(QMainWindow):
             w.setEnabled(on)
         if not on:
             self.voice_arm.setChecked(False)       # never stays armed across connections
+        if on and self.radio.info is not None and not civ.has_tuner(self.radio.info.radio_name):
+            self.tune_btn.setEnabled(False)
+            self.tune_btn.setToolTip("This radio has no antenna tuner command")
         self.manage_data_mod.setEnabled(not on)     # these take effect at connect time
         self.manage_data_off_mod.setEnabled(not on)
 
@@ -754,7 +757,7 @@ class MainWindow(QMainWindow):
                 lines.append("%s: unknown (set it to LAN on the radio)" % label)
             elif orig is not None:
                 lines.append("%s: %s (was %s; put back on disconnect)"
-                             % (label, name, civ.DATA_MOD_NAMES.get(orig, orig)))
+                             % (label, name, m.get("original_name") or orig))
                 restorable = True
             else:
                 lines.append("%s: %s" % (label, name))
@@ -768,7 +771,7 @@ class MainWindow(QMainWindow):
             for setting, label in labels.items():
                 if setting in v:
                     lines.append("%s: %s is still LAN; it will be put back to %s at the next connection"
-                                 % (radio, label, civ.DATA_MOD_NAMES.get(v[setting], v[setting])))
+                                 % (radio, label, civ.mod_name(radio.split("@")[0], v[setting])))
         self.data_mod_label.setText("\n".join(lines))
 
     # ================================================================== voice

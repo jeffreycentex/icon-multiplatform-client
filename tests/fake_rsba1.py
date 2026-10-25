@@ -113,8 +113,14 @@ class FakeRadio:
         self.drop_audio = set(drop_audio)
         self.send_audio = send_audio
         self.in_use_by = in_use_by          # (computer, ip) of another client holding the radio
-        self.menu = {b"\x00\x85": data_mod, b"\x00\x84": data_off_mod, b"\x00\x83": lan_mod_level,
-                     b"\x01\x09": remote_power}
+        # Menu items as this model numbers them (civ.MODELS). Tests address them
+        # through item(): fake.menu[fake.item("data_mod")].
+        m = civ.MODELS.get(name, civ.MODELS["IC-7300MK2"])
+        self.items = {k: m[k] for k in ("data_mod", "data_off_mod", "lan_mod_level", "remote_power") if m.get(k)}
+        values = {"data_mod": data_mod, "data_off_mod": data_off_mod,
+                  "lan_mod_level": lan_mod_level, "remote_power": remote_power}
+        self.menu = {item: values[k] for k, item in self.items.items()}
+        self.has_tuner = m.get("tuner", True)
         self.menu_ng = menu_ng               # radio that doesn't know these menu items
         self.menu_writes = []
         self.ptt = False
@@ -349,6 +355,8 @@ class FakeRadio:
                 return echo + [mk(civ.NG)]
             idx = {1: 34, 2: 28, 3: 22}[self.filt] if self.mode != 0x02 else {1: 44, 2: 29, 3: 14}[self.filt]
             return echo + [mk(0x1A, 0x03, bytes([civ.bcd_byte(idx)]))]
+        if cmd == 0x1C and payload[:1] == b"\x01" and not self.has_tuner:
+            return echo + [mk(civ.NG)]
         if cmd == 0x1C and payload[:1] == b"\x01":
             if self._tune_end is not None and time.monotonic() >= self._tune_end:
                 self.tuner, self._tune_end = self.tune_result, None
@@ -388,7 +396,7 @@ class FakeRadio:
                 return echo + [mk(civ.NG)]
             if len(payload) == 3:
                 v = self.menu[item]
-                data = bytes([civ.bcd_byte(v)]) if item != b"\x00\x83" else civ.encode_level(v)
+                data = bytes([civ.bcd_byte(v)]) if item != self.items.get("lan_mod_level") else civ.encode_level(v)
                 return echo + [mk(0x1A, 0x05, item + data)]
             v = civ.bcd_value(payload[3]) if len(payload) == 4 else civ.decode_level(payload[3:5])
             self.menu[item] = v
@@ -405,6 +413,9 @@ class FakeRadio:
         s = self.serial
         s.send(P.serial_data(s.sid, s.client_sid, self._serial_inner, frame))
         self._serial_inner = (self._serial_inner + 1) & 0xFFFF
+
+    def item(self, key):
+        return self.items[key]
 
     def push_freq(self, hz):
         """Simulate turning the VFO knob (CI-V transceive broadcast)."""

@@ -39,7 +39,8 @@ scope, CW/RTTY modes.
 | 3 | TX audio, PTT safety, DATA MOD + DATA OFF MOD switch/restore, voice PTT (armed Space), recording | verified (spots on PSKReporter; DATA MOD restore confirmed) |
 | 4 | RF power, TUNE, Output/SWR readout | TUNE + PTT verified; readout redesigned after feedback |
 | 5 | Power ON/OFF | verified on IC-7300MK2 (off, on, connect while off) |
-| 6 | PyInstaller builds + CI | CI green on macOS, Windows, Linux (100 tests incl. GUI, build, built-app self-check); owner to test the .app and a Windows build on hardware |
+| 6 | PyInstaller builds + CI | CI green on macOS, Windows, Linux (tests incl. GUI, build, built-app self-check); owner to test the .app and a Windows build on hardware |
+| 0.9 | IC-9700 / IC-7610 profiles, per-model menu table (`civ.MODELS`), Linux audio docs, README uses `run_icomremote.py` | tagged `v0.9`; other models tested against the fake radio only |
 
 ## Spec decisions (from the owner)
 
@@ -136,6 +137,21 @@ the real IC-7300MK2 that differ from or add to kappanhang:
 - Measured: RTT 6-18 ms over the owner's VPN, 0 packet loss in 20 s.
 - Re-login too often can make radios drop audio: 5 fast retries, then 65 s.
 - Password is blanked in packet hex dumps (`packets.redact`); keep it that way.
+
+## Per-model menu items (`civ.MODELS`)
+
+Never guess these: wrong item numbers write the wrong menu setting.
+
+| Model | DATA MOD | DATA OFF MOD | LAN MOD level | Power OFF setting | LAN value | Value order | Tuner (1C 01) | Source |
+|---|---|---|---|---|---|---|---|---|
+| IC-7300MK2 | 00 85 | 00 84 | 00 83 | 01 09 | 05 | MIC, USB, ACC, MIC+USB, MIC+ACC, LAN | yes | Icom IC-7300MK2 CI-V guide |
+| IC-705 | 01 19 | 01 18 | 01 17 (WLAN) | 00 73 | **03** (WLAN) | MIC, USB, MIC+USB, WLAN | yes | Icom IC-705 CI-V guide 2020-07-21 |
+| IC-9700 | 01 16 | 01 15 | 01 14 | 01 46 | 05 | MIC, **ACC, MIC+ACC, USB**, MIC+USB, LAN | **no** | IC-9700 CI-V guide v2 (rigpix) |
+| IC-7610 | — | — | — | — | — | — | yes | official guide not reachable; items left None, never written |
+
+To add a model: take the numbers from its Icom CI-V reference guide, add a
+`civ.MODELS` entry, a `FREQ_LIMITS` range, a `PROFILES` entry, and a test in
+`tests/test_models.py` (the fake radio reads its item numbers from the same table).
 
 ## CI-V items used (IC-7300MK2 reference)
 
@@ -234,7 +250,8 @@ race test (see `test_stale_reply_cannot_enable_ptt`, `test_quick_release_never_s
   `v*` tags attach archives to a release. This is the only Windows/Linux
   testing so far, and it is how Claude can see Windows results: read runs
   with `gh api repos/jeffreycentex/icon-multiplatform-client/actions/runs`.
-- Version: `icomremote/__init__.py` `__version__` (0.6.0 = step 6).
+- Version: `icomremote/__init__.py` `__version__` (0.9 = tag `v0.9`). Pushing a
+  `v*` tag makes the workflow attach the three archives to a GitHub Release.
 - Raw job logs are **not** reachable from Claude's sandbox (blob storage
   blocked); `tests/ci_run.py` and `build.py` report results as annotations:
   `gh api repos/jeffreycentex/icon-multiplatform-client/check-runs/<job id>/annotations`.

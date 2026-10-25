@@ -316,18 +316,55 @@ def set_menu(addr, item, value):
 
 # DATA MOD menu item per model (1A 05 xx xx), from each radio's CI-V reference.
 # Values: 00 MIC, 01 USB, 02 ACC, 03 MIC+USB, 04 MIC+ACC, 05 LAN.
-DATA_MOD_ITEM = {
-    "IC-7300MK2": b"\x00\x85",
+# Per-model menu items (1A 05 xx xx) and value codes, from each radio's Icom
+# CI-V reference guide. They differ between models: item numbers, the order
+# of the MIC/USB/ACC codes, and the LAN code itself (IC-705: 03 = WLAN).
+# A model missing here, or with an item set to None, is never written to:
+# the user sets DATA MOD on the radio.
+MODELS = {
+    "IC-7300MK2": dict(        # IC-7300MK2 CI-V reference guide
+        data_mod=b"\x00\x85", data_off_mod=b"\x00\x84", lan_mod_level=b"\x00\x83",
+        remote_power=b"\x01\x09", lan=0x05, tuner=True,
+        mod_names={0x00: "MIC", 0x01: "USB", 0x02: "ACC", 0x03: "MIC+USB", 0x04: "MIC+ACC", 0x05: "LAN"}),
+    "IC-705": dict(            # IC-705 CI-V reference guide (2020-07-21)
+        data_mod=b"\x01\x19", data_off_mod=b"\x01\x18", lan_mod_level=b"\x01\x17",
+        remote_power=b"\x00\x73", lan=0x03, tuner=True,
+        mod_names={0x00: "MIC", 0x01: "USB", 0x02: "MIC+USB", 0x03: "WLAN"}),
+    "IC-9700": dict(           # IC-9700 CI-V reference guide v2
+        data_mod=b"\x01\x16", data_off_mod=b"\x01\x15", lan_mod_level=b"\x01\x14",
+        remote_power=b"\x01\x46", lan=0x05, tuner=False,       # no 1C 01 on the IC-9700
+        mod_names={0x00: "MIC", 0x01: "ACC", 0x02: "MIC+ACC", 0x03: "USB", 0x04: "MIC+USB", 0x05: "LAN"}),
+    "IC-7610": dict(           # menu item numbers not verified yet: never written
+        data_mod=None, data_off_mod=None, lan_mod_level=None, remote_power=None,
+        lan=None, tuner=True, mod_names={}),
 }
-# DATA OFF MOD: modulation source in voice modes (LSB/USB/AM/FM), same values.
-DATA_OFF_MOD_ITEM = {
-    "IC-7300MK2": b"\x00\x84",
-}
-LAN_MOD_LEVEL_ITEM = {
-    "IC-7300MK2": b"\x00\x83",       # 0000-0255 = 0-100 %
-}
+
+
+def model_info(radio_name):
+    return MODELS.get(radio_name or "", {})
+
+
+def mod_name(radio_name, value):
+    """Display name of a DATA MOD / DATA OFF MOD value for this model."""
+    if value is None:
+        return "?"
+    return model_info(radio_name).get("mod_names", {}).get(value, "%02Xh" % value)
+
+
+def lan_value(radio_name):
+    return model_info(radio_name).get("lan")
+
+
+def has_tuner(radio_name):
+    return model_info(radio_name).get("tuner", True)
+
+
+# Compatibility views (IC-7300MK2 values)
+DATA_MOD_ITEM = {k: v["data_mod"] for k, v in MODELS.items() if v.get("data_mod")}
+DATA_OFF_MOD_ITEM = {k: v["data_off_mod"] for k, v in MODELS.items() if v.get("data_off_mod")}
+LAN_MOD_LEVEL_ITEM = {k: v["lan_mod_level"] for k, v in MODELS.items() if v.get("lan_mod_level")}
 DATA_MOD_LAN = 0x05
-DATA_MOD_NAMES = {0x00: "MIC", 0x01: "USB", 0x02: "ACC", 0x03: "MIC+USB", 0x04: "MIC+ACC", 0x05: "LAN"}
+DATA_MOD_NAMES = MODELS["IC-7300MK2"]["mod_names"]
 
 
 # ---------------------------------------------------------------- RF power, TX meters, tuner
@@ -378,7 +415,5 @@ def power_on(addr, preamble=WAKE_PREAMBLE):
 # "Power OFF Setting (for Remote Control)": 00 = Shutdown only, 01 =
 # Standby/Shutdown. Read and logged only: on the owner's IC-7300MK2 it reads 00
 # and the network still stays up after 18 00, and 18 01 over the LAN wakes it.
-REMOTE_POWER_ITEM = {
-    "IC-7300MK2": b"\x01\x09",
-}
+REMOTE_POWER_ITEM = {k: v["remote_power"] for k, v in MODELS.items() if v.get("remote_power")}
 REMOTE_POWER_NAMES = {0x00: "Shutdown only", 0x01: "Standby/Shutdown"}
