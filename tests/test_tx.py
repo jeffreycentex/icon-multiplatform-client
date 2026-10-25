@@ -131,7 +131,8 @@ class _TxBase(unittest.TestCase):
 
 class TestDataMod(_TxBase):
     def test_switch_and_restore(self):
-        self.assertTrue(wait_for(lambda: self.session.data_mod == LAN))
+        self.assertTrue(wait_for(lambda: self.session.data_mod == LAN
+                                 and self.session.mods["data_off_mod"]["value"] == LAN))
         self.assertEqual(self.radio.menu[b"\x00\x85"], LAN)
         self.assertEqual(self.radio.menu[b"\x00\x84"], LAN)
         self.assertEqual(self.pending(), {"IC-7300MK2@127.0.0.1": {"data_mod": USB, "data_off_mod": MIC}})

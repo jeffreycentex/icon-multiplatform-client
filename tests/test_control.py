@@ -37,6 +37,11 @@ class TestModeMapping(unittest.TestCase):
         self.assertEqual(civ.if_width_hz("AM", 44), 9000)
         self.assertEqual(civ.RigState(mode="FM", filter=2).width_hz, 10000)
 
+    def test_nominal_width(self):
+        self.assertEqual(civ.nominal_width_hz("USB", 2), 2400)
+        self.assertEqual(civ.nominal_width_hz("AM", 1), 9000)
+        self.assertEqual(civ.nominal_width_hz("FM", 3), 7000)
+
     def test_set_commands(self):
         self.assertEqual(civ.set_freq(0xB6, 7_074_000),
                          bytes([0xFE, 0xFE, 0xB6, 0xE0, 0x05, 0x00, 0x40, 0x07, 0x07, 0x00, 0xFD]))

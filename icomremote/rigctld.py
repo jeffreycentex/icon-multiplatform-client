@@ -267,7 +267,10 @@ class RigctldServer:
         if cmd == "get_mode":
             if not st.mode:
                 return [], E_IO
-            return [("Mode", hamlib_mode(st.mode, st.data)), ("Passband", "%d" % st.width_hz)], 0
+            # Right after a change the radio hasn't reported the width yet: give the
+            # filter's nominal width rather than 0.
+            width = st.width_hz or civ.nominal_width_hz(st.mode, st.filter)
+            return [("Mode", hamlib_mode(st.mode, st.data)), ("Passband", "%d" % width)], 0
         if cmd == "set_mode":
             want = rig_mode_from_hamlib(args[0], self.plain_ssb_is_data)
             if want is None:

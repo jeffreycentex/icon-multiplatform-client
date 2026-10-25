@@ -48,7 +48,7 @@ class TestPowerOffOn(_TxBase):
         self.assertTrue(wait_for(lambda: self.radio.powered))
         self.assertTrue(wait_for(lambda: self.session.power == "on" and self.session.data_mod == LAN, 8))
         self.assertEqual(self.radio.menu[b"\x00\x85"], LAN)
-        self.assertTrue(any("Radio powered on" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("Radio powered on" in t for t in self.statuses())))
         self.assertEqual(self.radio.power_log, ["off", "on"])
         self.session.set_frequency(7_074_000)                  # works again
         self.assertTrue(wait_for(lambda: self.radio.freq_hz == 7_074_000))

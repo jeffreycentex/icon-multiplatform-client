@@ -132,6 +132,14 @@ def swr(raw):
 #   AM:          00-49 -> 200..10000 Hz in 200 Hz steps
 #   FM:          fixed per filter (no 1A 03)
 FM_WIDTHS = {1: 15000, 2: 10000, 3: 7000}
+# Factory defaults per filter, used until the radio has answered 1A 03.
+NOMINAL_WIDTHS = {"AM": {1: 9000, 2: 6000, 3: 3000}, "FM": FM_WIDTHS,
+                  "SSB": {1: 3000, 2: 2400, 3: 1800}}
+
+
+def nominal_width_hz(mode, filt):
+    table = NOMINAL_WIDTHS.get(mode, NOMINAL_WIDTHS["SSB"])
+    return table.get(filt, 0)
 
 
 def if_width_hz(mode, index):
