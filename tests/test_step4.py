@@ -118,7 +118,7 @@ class TestTuneTimeout(_TxBase):
             self.assertTrue(wait_for(lambda: not self.session._tuning, 4))
         finally:
             S.TUNE_TIMEOUT = old
-        self.assertEqual(self.radio.tuner, 1)
+        self.assertTrue(wait_for(lambda: self.radio.tuner == 1))      # the stop command reaches the radio
         self.assertTrue(any("Tune stopped after" in t for t in self.statuses()))
 
 
