@@ -27,14 +27,14 @@ class TestPowerFrames(unittest.TestCase):
 class TestPowerOffOn(_TxBase):
     def test_off_then_on(self):
         self.assertTrue(wait_for(lambda: self.session.power == "on" and self.session.data_mod == LAN))
-        self.assertEqual(self.session.remote_power_setting, 0x01)
+        self.assertEqual(self.session.remote_power_setting, 0x00)      # as read from the real radio
         self.session.power_off()
         self.assertTrue(wait_for(lambda: not self.radio.powered and self.session.power == "standby"))
         # DATA MOD and DATA OFF MOD were put back before switching off
         self.assertEqual(self.radio.menu[b"\x00\x85"], USB)
         self.assertEqual(self.radio.menu[b"\x00\x84"], MIC)
         self.assertEqual(self.pending(), {})
-        self.assertTrue(any("network stays up" in t for t in self.statuses()))
+        self.assertTrue(any("Radio switched off" in t for t in self.statuses()))
         # standby: stays connected (audio timeout suspended), controls refused
         time.sleep(6.5)
         self.assertTrue(self.session.connected)
@@ -112,14 +112,14 @@ class TestPowerOnDoesNothing(TestStartsInStandby):
         self.assertEqual(self.session.power, "standby")
 
 
-class TestShutdownOnly(_TxBase):
-    radio_kw = {"remote_power": 0x00}
+class TestNetworkGoesDown(_TxBase):
+    """A radio whose network goes down with it (IC-705 on Wi-Fi). The IC-7300MK2 keeps it up."""
+    radio_kw = {"network_off_when_off": True}
 
     def test_network_goes_down(self):
-        self.assertTrue(wait_for(lambda: self.session.remote_power_setting == 0x00))
+        self.assertTrue(wait_for(lambda: self.session.power == "on"))
         self.session.power_off()
         self.assertTrue(wait_for(lambda: self.radio.network_down))
-        self.assertTrue(any("network goes down too" in t for t in self.statuses()))
         self.assertTrue(wait_for(lambda: any("stopped responding" in t for t in self.statuses()), 12))
         self.assertTrue(wait_for(lambda: not self.session.connected))
 

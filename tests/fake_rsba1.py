@@ -102,7 +102,8 @@ class FakeRadio:
                  freq_hz=14_074_000, mode=0x01, data=True, filt=1, drop_audio=(), send_audio=True,
                  in_use_by=None, data_mod=0x01, data_off_mod=0x00, lan_mod_level=128, menu_ng=False,
                  tune_seconds=0.6, tune_result=0x01, swr_raw=48,
-                 powered=True, remote_power=0x01, power_on_works=True, wake_seconds=1.0):
+                 powered=True, remote_power=0x00, power_on_works=True, wake_seconds=1.0,
+                 network_off_when_off=False):
         self.user, self.password = user, password
         self.name = name
         self.civ_address = civ_address
@@ -128,6 +129,7 @@ class FakeRadio:
         self.powered = powered               # False = standby: network up, CI-V silent, no audio
         self.network_down = False            # after 18 00 with "Shutdown only": nothing answers
         self.power_on_works = power_on_works
+        self.network_off_when_off = network_off_when_off   # e.g. IC-705 Wi-Fi; not the IC-7300MK2
         self.wake_seconds = wake_seconds
         self.power_log = []                  # "off" / "on" commands received
         self.tx_audio_while_ptt = 0
@@ -291,14 +293,18 @@ class FakeRadio:
             if f[4] == 0x18 and len(f) == 7:
                 self._power_cmd(f[5])
                 continue
-            if not self.powered:
-                continue                         # standby: CI-V doesn't answer
+            if not self.powered:                 # standby: like the real IC-7300MK2,
+                self._serial_send(f)             # echo + NG to every command
+                self._serial_send(civ.frame(civ.CONTROLLER, civ.NG, frm=self.civ_address))
+                continue
             for reply in self._civ_reply(f):
                 self._serial_send(reply)
 
     def _power_cmd(self, on):
         self.power_log.append("on" if on else "off")
         if on:
+            if self.power_on_works and not self.network_down:
+                self._serial_send(civ.frame(civ.CONTROLLER, civ.OK, frm=self.civ_address))
             if not self.powered and self.power_on_works and not self.network_down:
                 self._loop.call_later(self.wake_seconds, setattr, self, "powered", True)
             return
@@ -306,7 +312,7 @@ class FakeRadio:
             self._serial_send(civ.frame(civ.CONTROLLER, civ.OK, frm=self.civ_address))
         self.powered = False
         self.ptt = False
-        if self.menu[b"\x01\x09"] == 0x00:      # Shutdown only: the network goes down too
+        if self.network_off_when_off:
             self.network_down = True
 
     def _civ_reply(self, f):

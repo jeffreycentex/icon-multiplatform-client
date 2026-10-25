@@ -367,8 +367,9 @@ def power_on(addr, preamble=WAKE_PREAMBLE):
     return b"\xfe" * preamble + frame(addr, 0x18, 0x01)
 
 
-# "Power OFF Setting (for Remote Control)": 00 = Shutdown only (network goes
-# down with the radio), 01 = Standby/Shutdown (network stays up in standby).
+# "Power OFF Setting (for Remote Control)": 00 = Shutdown only, 01 =
+# Standby/Shutdown. Read and logged only: on the owner's IC-7300MK2 it reads 00
+# and the network still stays up after 18 00, and 18 01 over the LAN wakes it.
 REMOTE_POWER_ITEM = {
     "IC-7300MK2": b"\x01\x09",
 }

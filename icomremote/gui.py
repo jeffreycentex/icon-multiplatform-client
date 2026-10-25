@@ -126,9 +126,7 @@ class MainWindow(QMainWindow):
         g.addWidget(self.conn_label, 3, 0, 1, 4)
         self.power_btn = QPushButton("Power")
         self.power_btn.setEnabled(False)
-        self.power_btn.setToolTip("Switch the radio off (to standby) or on.\n"
-                                  "Switching on from here needs the radio's Power OFF Setting\n"
-                                  "(for Remote Control) set to Standby/Shutdown.")
+        self.power_btn.setToolTip("Switch the radio off (its network stays up) or on again.")
         self.power_btn.clicked.connect(self._power_clicked)
         g.addWidget(self.info_label, 4, 0, 1, 3)
         g.addWidget(self.power_btn, 4, 3)
@@ -511,14 +509,8 @@ class MainWindow(QMainWindow):
 
     def _power_clicked(self, *_):
         if self.radio.power == "on":
-            setting = self.radio.remote_power_setting
-            if setting == 0x01:
-                note = "Its network stays up, so you can switch it on again from here."
-            elif setting == 0x00:
-                note = ("Its Power OFF Setting is 'Shutdown only': the network goes down too, "
-                        "and you will NOT be able to switch it on from here.")
-            else:
-                note = "Whether it can be switched on again from here is unknown."
+            note = ("Its network normally stays up, so it can be switched on again from here "
+                    "(verified on the IC-7300MK2). If it doesn't, switch it on at the radio.")
             if self.radio.ptt or self.radio.tx:
                 note = "Transmit will be stopped. " + note
             ans = QMessageBox.question(self, "Power off",
@@ -955,9 +947,7 @@ class MainWindow(QMainWindow):
         elif kind == "powering_on":
             self._update_power_btn(powering_on=payload)
         elif kind == "remote_power_setting":
-            if payload == 0x00:
-                self.statusBar().showMessage("Note: the radio's Power OFF Setting is 'Shutdown only'; "
-                                             "after Power OFF it can't be switched on from here", 10000)
+            pass                                  # logged only; its effect on the LAN is unclear
         elif kind == "connected":
             self._set_controls_enabled(payload and self.radio.power == "on")
             self._update_power_btn()

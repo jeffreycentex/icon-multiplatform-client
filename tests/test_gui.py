@@ -140,7 +140,7 @@ class TestGui(unittest.TestCase):
             w.power_btn.click()
         finally:
             QMessageBox.question = orig
-        self.assertIn("network stays up", asked[0])
+        self.assertIn("switched on again from here", asked[0])
         self.assertTrue(self.pump_until(lambda: not self.radio.powered and w.power_btn.text() == "Power ON"))
         self.assertFalse(w.freq.isEnabled())                 # controls off in standby
         self.assertEqual(self.radio.menu[b"\x00\x85"], 0x01)   # DATA MOD put back before power-off

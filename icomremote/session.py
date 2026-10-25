@@ -503,7 +503,9 @@ class RadioSession:
             elif kind == "foreign":
                 log.debug("CI-V frame from unexpected address %02Xh", value)
             elif kind == "ack" and not value:
-                log.info("radio answered NG to a CI-V command")
+                # Normal in standby (the radio answers every command with NG)
+                # and for items a mode doesn't have (1A 03 in FM).
+                log.debug("radio answered NG to a CI-V command")
 
     def _tx_civ(self, frame):
         """Loop thread: send a CI-V frame, counting reads per group."""
@@ -820,6 +822,7 @@ class RadioSession:
         if item is not None:
             v = await self._read_menu(item)
             if v is not None and v != self.remote_power_setting:
+                log.info("Power OFF Setting (for Remote Control): %s", civ.REMOTE_POWER_NAMES.get(v, v))
                 self.remote_power_setting = v
                 self._emit("remote_power_setting", v)
         await self._setup_mods(radio_name, host)
@@ -848,11 +851,7 @@ class RadioSession:
             self._tx_civ(civ.power_off(self.civ_address))
             self._mods_ready = False
             self._set_power("standby")
-            self._status("Radio switched off" + (
-                "; its network stays up, so it can be switched on from here"
-                if self.remote_power_setting == 0x01 else
-                "; its network goes down too (Power OFF Setting is Shutdown only)"
-                if self.remote_power_setting == 0x00 else ""))
+            self._status("Radio switched off")
         asyncio.run_coroutine_threadsafe(_do(), self._loop)
 
     def power_on(self):

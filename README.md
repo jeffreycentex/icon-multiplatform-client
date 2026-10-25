@@ -23,7 +23,7 @@ IC-7300MK2 ◄udp─┤ session thread (asyncio): control / serial / audio  │
 | 2 | GUI, frequency/mode/filter control, S-meter, rigctld | done, verified on an IC-7300MK2 |
 | 3 | TX audio (data and voice), PTT with safety rules, DATA MOD / DATA OFF MOD switch and restore, recording | done, verified on an IC-7300MK2 |
 | 4 | Output/SWR readout, RF power, TUNE | done, verified on an IC-7300MK2 |
-| 5 | Power ON/OFF | **this release** |
+| 5 | Power ON/OFF | done, verified on an IC-7300MK2 |
 | 6 | PyInstaller builds | |
 
 
@@ -178,12 +178,12 @@ The button next to the radio info reads **Power OFF** when the radio is on and
 - While the radio is in standby the app stays connected to its network
   server; tuning and transmit controls are disabled. Switching the radio off
   or on at the radio is noticed within a few seconds.
-- Switching on remotely needs the radio's **Power OFF Setting (for Remote
-  Control)** on **Standby/Shutdown**, so its network stays up while it is
-  off. The app reads that setting (CI-V `1A 05 01 09`) and the confirm dialog
-  says whether you'll be able to switch the radio on again from here. With
-  *Shutdown only*, the network goes down with the radio and the app reports
-  that the radio stopped responding.
+- On the IC-7300MK2 the radio's network stays up after Power OFF (verified,
+  with its *Power OFF Setting (for Remote Control)* on *Shutdown only*), and
+  Power ON over the LAN brings it back in about 4 s. You can also connect to
+  a radio that is already off and switch it on from here.
+- If a radio's network goes down with it (e.g. an IC-705 on Wi-Fi), the app
+  reports that the radio stopped responding; switch it on at the radio.
 - rigctl `get_powerstat` reports on (1) / standby (2); `set_powerstat` is
   accepted and ignored: programs don't switch the radio on or off.
 

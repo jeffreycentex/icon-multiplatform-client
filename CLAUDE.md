@@ -38,7 +38,7 @@ scope, CW/RTTY modes.
 | 2 | GUI, freq/mode/filter, S-meter, rigctld | verified |
 | 3 | TX audio, PTT safety, DATA MOD + DATA OFF MOD switch/restore, voice PTT (armed Space), recording | verified (spots on PSKReporter; DATA MOD restore confirmed) |
 | 4 | RF power, TUNE, Output/SWR readout | TUNE + PTT verified; readout redesigned after feedback |
-| 5 | Power ON/OFF | built and tested against the fake radio; **unverified on the real radio** |
+| 5 | Power ON/OFF | verified on IC-7300MK2 (off, on, connect while off) |
 | 6 | PyInstaller builds (`icomremote.spec`) | not started |
 
 ## Spec decisions (from the owner)
@@ -77,8 +77,9 @@ scope, CW/RTTY modes.
   grey off-air. (A bar that switched to Po/SWR on TX confused the owner.)
 - **Layout**: two columns. Left: radio, tuning, RX audio, recording. Right:
   transmit, rigctld. Avoid making the window taller.
-- **Power ON/OFF** (step 5): OFF with a confirm dialog. ON over LAN is
-  unverified. Hide/disable ON where it can't work (IC-705: Wi-Fi drops when off).
+- **Power ON/OFF** (step 5): OFF with a confirm dialog (unkey + MOD restore
+  first). ON works over the LAN on the IC-7300MK2. Where a radio's network
+  drops when off, Power ON is simply unreachable (not connected).
 - `samplerate` removed from requirements (Windows build pain; linear
   resampling is inaudible at 48 kHz). PyAV stays for M4A.
 
@@ -167,11 +168,20 @@ Scales: S-meter 0=S0, 120=S9, 241=S9+60. Po 143=50 %, 213=100 %. SWR 48=1.5,
 - Power OFF: stop tune, unkey, restore DATA MOD/DATA OFF MOD, then `18 00`.
   Power ON: 25 x FE preamble + `18 01`, wait up to 25 s; on wake, re-read
   state and switch the MODs to LAN again (`_power_is_on`).
-- Reports conflict on real hardware (AetherSDR issue #5349, wfview forum):
-  whether a standby radio keeps granting RS-BA1 streams, whether audio stops,
-  and whether `18 01` over LAN wakes the radio or only the display. The fake
-  radio models one plausible behaviour; **confirm on the IC-7300MK2 and
-  adjust the fake to match**.
+- **Verified on the IC-7300MK2** (log of 2026-10-24):
+  - After `18 00` the network stays up; the RS-BA1 session survives and a
+    new login while off is accepted and streams are granted.
+  - In standby the radio **answers every CI-V command with NG (`FA`)**, it
+    is not silent. Standby is still detected by "no state replies for 3 s";
+    NG is logged at debug only.
+  - `18 01` (with 25 x FE preamble) over the LAN is ACKed (`FB`) and the
+    radio answers frequency reads about 4 s later.
+  - `1A 05 01 09` reads `00` ("Shutdown only") on this radio, yet the
+    network stays up. Don't predict LAN behaviour from that setting; it is
+    only logged.
+- The fake radio matches this (NG in standby, ACK on power-on).
+  `network_off_when_off=True` models a radio whose network drops (IC-705
+  Wi-Fi), which the 6 s link check turns into "stopped responding".
 
 ## Concurrency lessons (both found by tests, both fixed)
 
