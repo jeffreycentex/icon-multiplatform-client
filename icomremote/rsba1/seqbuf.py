@@ -14,6 +14,9 @@ restructured around an explicit expected-sequence counter.
 MAX_SEQ = 0x10000
 MAX_RETRANSMIT_SPAN = 10      # don't ask for more than this many packets at once
 RESYNC_DISTANCE = 1000        # a jump this far ahead means the sender restarted
+LATE_RESYNC = 20              # this many "already delivered" packets in a row: the
+                              # sender's counter went back; follow it instead of
+                              # dropping everything until it catches up (~11 min of audio)
 
 
 def seq_diff(a, b):
@@ -33,6 +36,8 @@ class ReorderBuffer:
         self.lost = 0
         self.retransmit_requests = 0
         self.duplicates = 0
+        self.resyncs = 0
+        self._late_run = 0
 
     def reset(self):
         self.__init__(self.hold)
@@ -48,18 +53,27 @@ class ReorderBuffer:
             self._expected = seq
         d = seq_diff(seq, self._expected)
         if d < 0:
-            self.duplicates += 1          # already delivered or given up on
-            return False
-        if d > RESYNC_DISTANCE:           # sender restarted its counter
-            self._pending.clear()
-            self._expected = seq
-            self._gap_since = None
-            self._requested = None
+            self._late_run += 1
+            if self._late_run < LATE_RESYNC:
+                self.duplicates += 1      # already delivered or given up on
+                return False
+            self._resync(seq)             # counter went back: follow it
+        elif d > RESYNC_DISTANCE:         # sender restarted its counter
+            self._resync(seq)
+        self._late_run = 0
         if seq in self._pending:
             self.duplicates += 1
             return False
         self._pending[seq] = payload
         return True
+
+    def _resync(self, seq):
+        self._pending.clear()
+        self._expected = seq
+        self._gap_since = None
+        self._requested = None
+        self._late_run = 0
+        self.resyncs += 1
 
     def poll(self, now):
         """-> (ready, request, next_deadline)

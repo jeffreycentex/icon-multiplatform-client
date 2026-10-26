@@ -56,6 +56,12 @@ MOD_SETTINGS = {"data_mod": ("DATA MOD", "data_mod"),        # label, key in civ
                 "data_off_mod": ("DATA OFF MOD", "data_off_mod")}
 FENCE_SECONDS = 1.5
 CIV_ANSWER_TIMEOUT = 1.0
+MENU_READ_TRIES = 2
+MOD_RETRY_TICKS = 40                # poll ticks (10 s) between re-reads of an unknown DATA MOD
+MODS_SETUP_WAIT = 8.0               # key-down waits this long for DATA MOD setup to finish
+TX_INPUT_WATCHDOG = 1.0             # keyed and no audio from the input for this long: reopen it
+SINK_STALL_SECONDS = 2.0            # audio arriving but the sound card has stopped asking for it
+HEALTH_LOG_INTERVAL = 60.0
 
 
 @dataclass(frozen=True)
@@ -142,6 +148,11 @@ class RadioSession:
         self.tx = False                  # what the radio reports (1C 00)
         self.ptt_timeout = DEFAULT_PTT_TIMEOUT
         self._keyed = False              # loop-thread view of self.ptt
+        self._tx_frames_sent = 0         # audio frames sent since key-down
+        self._tx_key_count = 0
+        self._sink_watch = None          # (callbacks, rx packets, time, sink) at the last check
+        self._mod_retry = None           # task re-reading DATA MOD after a failed read
+        self._health_at = 0.0
         self._ptt_owner = None
         self._ptt_timer = None
         self._tx_devices = {"data": None, "voice": None}   # kind -> (key, gain)
@@ -407,6 +418,9 @@ class RadioSession:
                     self._tx_civ(civ.read_smeter(addr))
                 if self._tuning:
                     self._tx_civ(civ.read_tuner(addr))
+                if (n % MOD_RETRY_TICKS == 0 and self._mods_ready is True and self._mod_retry is None
+                        and not self._keyed and self._unknown_mods()):
+                    self._mod_retry = self._loop.create_task(self._retry_unknown_mods())
                 if n % 8 == 0:            # the radio also pushes changes (CI-V transceive)
                     self._tx_civ(civ.read_freq(addr))
                     self._tx_civ(civ.read_mode(addr))
@@ -428,8 +442,53 @@ class RadioSession:
             while True:
                 await asyncio.sleep(STATS_INTERVAL)
                 self._emit("stats", self.stats())
+                self._check_sink()
+                now = time.monotonic()
+                if now - self._health_at >= HEALTH_LOG_INTERVAL:
+                    self._health_at = now
+                    self._log_health()
         except asyncio.CancelledError:
             pass
+
+    def _check_sink(self):
+        """Audio is arriving but the sound card's callback has stopped running
+        (device stalled or reset underneath us): reopen the output."""
+        a = self._audio
+        sink = self._sinks.get("card")
+        cb = getattr(sink, "callbacks", None)
+        if a is None or cb is None:
+            self._sink_watch = None
+            return
+        now = time.monotonic()
+        w = self._sink_watch
+        if w is None or w[0] != cb or w[1] == a.rx_audio_packets or w[3] is not sink:
+            self._sink_watch = (cb, a.rx_audio_packets, now, sink)
+            return
+        if now - w[2] < SINK_STALL_SECONDS:
+            return
+        self._sink_watch = None
+        name = sink.device_key.split("|")[0]
+        log.warning("sound card '%s' stopped playing (%d callbacks, audio still arriving); reopening",
+                    name, cb)
+        try:
+            self._install_sink("card", SoundCardSink(sink.device_key, sink.gain))
+            self._status("Audio output '%s' had stalled and was reopened" % name, "error")
+        except Exception as e:
+            log.exception("reopening sound card failed")
+            self._drop_sink("card", "Audio output '%s' stalled and could not be reopened: %s" % (name, e))
+
+    def _log_health(self):
+        st = self.stats()
+        a = self._audio
+        sink = self._sinks.get("card")
+        log.info("health: rtt %.0f ms, rx audio %d packets (lost %d, resyncs %d, late %d), "
+                 "card %s, tx input %s",
+                 st.get("rtt_ms", 0.0), st.get("audio_packets", 0), st.get("audio_lost", 0),
+                 a.rx.resyncs if a else 0, a.rx.duplicates if a else 0,
+                 ("callbacks %s underruns %s" % (getattr(sink, "callbacks", "?"), getattr(sink, "underruns", "?")))
+                 if sink else "none",
+                 ", ".join("%s=%s peak %.2f" % (k, self._tx_input_name(k), s.peak)
+                           for k, s in self._tx_sources.items()) or "none")
 
     def stats(self):
         out = {"connected": self._connected}
@@ -696,9 +755,14 @@ class RadioSession:
         if self._source_kind(kind) is None:
             return "no transmit audio input selected"
         setting = "data_mod" if kind == "data" else "data_off_mod"
-        v = self.mods[setting]["value"]
+        m = self.mods[setting]
+        v = m["value"]
         if v is not None and v != self._lan:
             return "%s is %s, not LAN" % (MOD_SETTINGS[setting][0], self._mod_name(v))
+        if v is None and m.get("item") is not None and self._mods_ready is True:
+            # Keying with DATA MOD unknown could transmit a carrier with the
+            # radio taking audio from USB/ACC instead of the LAN.
+            return "%s could not be read from the radio (not confirmed as LAN)" % MOD_SETTINGS[setting][0]
         return None
 
     def ptt_refusal(self, voice_ok=False):
@@ -775,7 +839,7 @@ class RadioSession:
         src = self._tx_sources.get(self._tx_src)
         if src is not None:
             src.stop()
-        log.info("PTT off (%s)", self._tx_kind)
+        log.info("PTT off (%s, %d audio frames sent)", self._tx_kind, self._tx_frames_sent)
         self._tx_kind = None
         self._tx_src = None
         self._emit("ptt", False)
@@ -784,6 +848,11 @@ class RadioSession:
 
     async def _key_after_check(self):
         a = self.civ_address
+        deadline = time.monotonic() + MODS_SETUP_WAIT
+        while self._mods_ready is None and self._keying and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)        # DATA MOD switch to LAN still running
+        if not self._keying:
+            return
         r = await self._civ_ask(civ.read_data_mode(a), lambda k, v: k == "reply" and v == "data")
         if not self._keying:                 # unkeyed or disconnected meanwhile
             return
@@ -803,11 +872,59 @@ class RadioSession:
         self._tx_kind = "data" if dec.state.data else "voice"
         self._tx_src = self._source_kind(self._tx_kind)
         self._keyed = True
+        self._tx_frames_sent = 0
+        self._tx_key_count += 1
         self._tx_sources[self._tx_src].start()
         self._tx_civ(civ.set_ptt(a, True))
         self._tx_civ(civ.read_ptt(a))
-        log.info("PTT on (%s)", self._tx_kind)
+        log.info("PTT on (%s, input '%s')", self._tx_kind, self._tx_input_name(self._tx_src))
         self._emit("ptt", True)
+        self._loop.call_later(TX_INPUT_WATCHDOG, self._tx_input_check, self._tx_key_count, False)
+
+    def _tx_input_name(self, kind):
+        dev = self._tx_devices.get(kind)
+        return dev[0].split("|")[0] if dev else "?"
+
+    def _tx_input_check(self, key_count, reopened):
+        """Keyed but nothing captured from the transmit input: the capture
+        stream has stalled (seen on macOS). Reopen it once, then report."""
+        if not self._keyed or key_count != self._tx_key_count or self._tx_frames_sent > 0:
+            return
+        kind = self._tx_src
+        name = self._tx_input_name(kind)
+        if reopened:
+            log.error("TX input '%s' still delivers no audio after reopening", name)
+            self._status("No audio from transmit input '%s': the radio is keyed without audio"
+                         % name, "error")
+            return
+        log.warning("TX input '%s' delivered no audio for %.1f s while keyed; reopening it",
+                    name, TX_INPUT_WATCHDOG)
+        self._close_tx_source(kind)
+        self._open_tx_source(kind)
+        src = self._tx_sources.get(kind)
+        if src is None:                      # reopen failed (status already shown)
+            self._unkey(reason="Unkeyed: transmit input '%s' failed" % name)
+            return
+        src.start()
+        self._loop.call_later(TX_INPUT_WATCHDOG, self._tx_input_check, key_count, True)
+
+    def _unknown_mods(self):
+        return [k for k, m in self.mods.items() if m["value"] is None and m.get("item") is not None]
+
+    async def _retry_unknown_mods(self):
+        """DATA MOD / DATA OFF MOD could not be read at connect: try again
+        (transmit is refused while they are unknown)."""
+        try:
+            for setting in self._unknown_mods():
+                if self._mods_ready is not True or self._keyed or self._keying or not self.info:
+                    return
+                m = self.mods[setting]
+                label = MOD_SETTINGS[setting][0]
+                log.info("%s still unknown; reading it again", label)
+                await self._setup_mod(setting, label, m["item"], self.info.radio_name, m["key"])
+            self._emit_mods()
+        finally:
+            self._mod_retry = None
 
     def _ptt_timed_out(self):
         self._ptt_timer = None
@@ -1041,6 +1158,7 @@ class RadioSession:
     def _send_tx_frame(self, pcm, kind):
         if self._keyed and kind == self._tx_src and self._audio is not None and not self._audio.closed:
             self._audio.send_frame(pcm)
+            self._tx_frames_sent += 1
 
     # ------------------------------------------------------------------ DATA MOD / DATA OFF MOD
     @property
@@ -1077,9 +1195,15 @@ class RadioSession:
             self._status("%s switching is not known for %s: set %s to LAN on the radio "
                          "for transmit audio" % (label, radio_name, label), "error")
             return
-        cur = await self._read_menu(item)
+        cur = None
+        for attempt in range(MENU_READ_TRIES):
+            cur = await self._read_menu(item)
+            if cur is not None:
+                break
+            log.warning("%s read %d/%d got no answer", label, attempt + 1, MENU_READ_TRIES)
         if cur is None:
-            self._status("Could not read %s from the radio; transmit may use the wrong input" % label,
+            self._status("Could not read %s from the radio; transmit is refused until it can be "
+                         "read (trying again every %.0f s)" % (label, MOD_RETRY_TICKS * POLL_INTERVAL),
                          "error")
             return
         m["value"] = cur

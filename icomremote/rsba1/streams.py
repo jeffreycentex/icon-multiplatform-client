@@ -304,13 +304,13 @@ class AudioStream(_ReceivingStream):
 
     def handle(self, d):
         if P.is_audio_data(d):
-            self._arm_timeout()
             self._rx_add(int.from_bytes(d[6:8], "little"), d)
         elif not P.is_idle(d):
             log.debug("audio: unhandled %d-byte packet %s", len(d), P.hexdump(d))
 
     def deliver(self, seq, d):
         pcm = bytes(d[P.AUDIO_HEADER_LEN:])
+        self._arm_timeout()                     # audio actually delivered, not just packets arriving
         self.rx_audio_packets += 1
         self.rx_audio_bytes += len(pcm)
         self.on_audio(pcm)

@@ -357,7 +357,14 @@ Split `None`. Click *Test CAT*, then *Test PTT*. Settings → Audio: input =
 the receive cable, output = the transmit cable (see above).
 
 **fldigi** (Configure → Rig Control → Hamlib): rig `Hamlib NET rigctl`, device
-`127.0.0.1:4532`.
+`127.0.0.1:4532`. Audio (Configure → Soundcard → Devices → PortAudio):
+**Capture** = the *receive* cable (what you hear from the radio),
+**Playback** = the *transmit* cable (what goes to the radio):
+
+| fldigi | Windows | macOS | Linux |
+|---|---|---|---|
+| Capture (receive) | `CABLE Output` | `BlackHole 2ch` | `Monitor of IcomRX` / `IcomRX-Input` |
+| Playback (transmit) | second cable's input | `BlackHole 16ch` | `IcomTX` |
 
 **Command line:**
 
@@ -479,10 +486,13 @@ console window for troubleshooting.
 
 ### Logs and self-check
 
-The built app has no terminal, so it writes its log to `icomremote.log` in
-its settings folder (macOS `~/Library/Application Support/IcomRemote/`,
-Windows `%APPDATA%\IcomRemote\`, Linux `~/.config/icomremote/`), replaced
-at each start. Start it with `--debug` for packet dumps.
+The app (built or run from Python) always writes its log to `icomremote.log`
+in its settings folder (macOS `~/Library/Application Support/IcomRemote/`,
+Windows `%APPDATA%\IcomRemote\`, Linux `~/.config/icomremote/`). The five
+previous runs are kept as `icomremote.log.1` (last run) to `.5`, so after a
+session that misbehaved and a restart, send `icomremote.log.1`. A `health:`
+line every minute records received audio, sound-card and transmit-input
+state. Start with `--debug` for packet dumps.
 
 `--check` reports what the installation can do and exits (0 = OK):
 

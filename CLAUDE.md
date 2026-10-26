@@ -219,6 +219,27 @@ Scales: S-meter 0=S0, 120=S9, 241=S9+60. Po 143=50 %, 213=100 %. SWR 48=1.5,
 Any new feature that changes radio state or keys the transmitter needs a
 race test (see `test_stale_reply_cannot_enable_ptt`, `test_quick_release_never_sticks`).
 
+## Reliability (2026-10-25)
+
+Owner saw, intermittently: no RX audio after connecting (speakers and cable),
+and 3x data TX keyed without audio; a restart fixed both. Cause not yet
+confirmed from a log. Hardening added (`tests/test_reliability.py`):
+- ReorderBuffer follows a counter that went back (`LATE_RESYNC` late packets
+  in a row) instead of dropping everything as duplicates; the audio timeout
+  is re-armed on *delivered* audio, so a stalled buffer now reconnects.
+- Sound-card output whose callback stopped while audio arrives: reopened
+  (`_check_sink`, 2 s).
+- TX input delivering no frames 1 s after key-down: reopened once, then an
+  error status (`_tx_input_check`).
+- DATA MOD / DATA OFF MOD unreadable: PTT refused (was allowed with the value
+  unknown), re-read every 10 s; key-down waits for MOD setup to finish.
+- Log always written to the settings dir, last 5 runs kept (`.1` = previous),
+  `health:` line each minute. Ask for `icomremote.log.1` after a bad session.
+
+Open: on the IC-7300MK2 the owner reports the passband shown in USB-D as
+~800-2100 Hz while the radio shows full width; where it is displayed not yet
+known.
+
 ## Environment and testing
 
 - `python -m unittest discover -s tests -v`; also run with

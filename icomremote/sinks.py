@@ -260,6 +260,7 @@ class SoundCardSink:
         self._late_min = collections.deque()
         self._clock = time.monotonic     # replaceable for simulated-time tests
         self.underruns = 0
+        self.callbacks = 0               # device callbacks so far (stall detection)
 
     # -- worker-thread side --------------------------------------------------
 
@@ -386,6 +387,7 @@ class SoundCardSink:
     # -- PortAudio-thread side -----------------------------------------------
 
     def _callback(self, outdata, frames, time_info, status):
+        self.callbacks += 1
         mono = np.zeros(frames, dtype=np.float32)
         if self._primed:
             got = self._ring.pull(mono)

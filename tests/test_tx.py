@@ -190,7 +190,7 @@ class TestUnknownMenu(_TxBase):
     radio_kw = {"menu_ng": True}
 
     def test_connects_anyway(self):
-        self.assertTrue(wait_for(lambda: any("Could not read DATA MOD" in t for t in self.statuses()), 6))
+        self.assertTrue(wait_for(lambda: any("Could not read DATA MOD" in t for t in self.statuses()), 15))
         self.assertTrue(self.session.connected)
         self.assertIsNone(self.session.data_mod)
 
