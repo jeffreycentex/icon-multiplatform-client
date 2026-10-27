@@ -54,7 +54,9 @@ class TestPowerOffOn(_TxBase):
         self.assertTrue(wait_for(lambda: self.radio.freq_hz == 7_074_000))
 
     def test_switched_off_on_the_radio(self):
-        self.assertTrue(wait_for(lambda: self.session.power == "on"))
+        # Wait for the connect-time DATA MOD setup to finish: standby detection
+        # starts after it (slow CI switched the radio off in the middle of it).
+        self.assertTrue(wait_for(lambda: self.session.power == "on" and self.session._mods_ready is True))
         self.radio.powered = False                             # power button on the radio
         self.assertTrue(wait_for(lambda: self.session.power == "standby", 8))
         self.assertTrue(self.session.connected)
