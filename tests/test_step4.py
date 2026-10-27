@@ -71,7 +71,7 @@ class TestTune(_TxBase):
             self.session.set_tx_device("fake", 1.0) or self.session.set_ptt(True)
         self.assertTrue(wait_for(lambda: any(k == "meter" and v[0] == "swr" for k, v in self.events)))
         self.assertTrue(wait_for(lambda: not self.session._tuning, 4))
-        self.assertTrue(any("Tune finished: tuner on" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("Tune finished: tuner on" in t for t in self.statuses())))
         self.assertEqual(self.radio.tune_aborted, 0)
         self.assertEqual(len(self.radio.tune_started), 1)
 
@@ -102,7 +102,7 @@ class TestTuneFails(_TxBase):
         self.assertTrue(wait_for(lambda: self.session.tuner == 1))
         self.session.tune()
         self.assertTrue(wait_for(lambda: not self.session._tuning, 4))
-        self.assertTrue(any("Tune finished: tuner off" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("Tune finished: tuner off" in t for t in self.statuses())))
 
 
 class TestTuneTimeout(_TxBase):
@@ -119,7 +119,7 @@ class TestTuneTimeout(_TxBase):
         finally:
             S.TUNE_TIMEOUT = old
         self.assertTrue(wait_for(lambda: self.radio.tuner == 1))      # the stop command reaches the radio
-        self.assertTrue(any("Tune stopped after" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("Tune stopped after" in t for t in self.statuses())))
 
 
 if __name__ == "__main__":

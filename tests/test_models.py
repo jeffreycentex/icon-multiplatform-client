@@ -63,8 +63,8 @@ class TestIC9700(_ModelBase):
                                  and self.session.mods["data_off_mod"]["value"] == 0x05))
         self.assertEqual(self.radio.menu[b"\x01\x16"], 0x05)     # DATA MOD = 1A 05 01 16
         self.assertEqual(self.radio.menu[b"\x01\x15"], 0x05)     # DATA OFF MOD = 1A 05 01 15
-        self.assertTrue(any("DATA MOD switched from USB to LAN" in t for t in self.statuses()))
-        self.assertTrue(any("DATA OFF MOD switched from ACC to LAN" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("DATA MOD switched from USB to LAN" in t for t in self.statuses())))
+        self.assertTrue(wait_for(lambda: any("DATA OFF MOD switched from ACC to LAN" in t for t in self.statuses())))
         self.session.disconnect()
         self.assertEqual(self.radio.menu[b"\x01\x16"], 0x03)
         self.assertEqual(self.radio.menu[b"\x01\x15"], 0x01)
@@ -84,10 +84,11 @@ class TestIC705(_ModelBase):
     radio_kw = {"data_mod": 0x01, "data_off_mod": 0x00}
 
     def test_wlan_is_03(self):
-        self.assertTrue(wait_for(lambda: self.session.data_mod == 0x03))
+        self.assertTrue(wait_for(lambda: self.session.data_mod == 0x03
+                                 and self.session.mods["data_off_mod"]["value"] == 0x03))
         self.assertEqual(self.radio.menu[b"\x01\x19"], 0x03)     # DATA MOD = 1A 05 01 19, WLAN = 03
         self.assertEqual(self.radio.menu[b"\x01\x18"], 0x03)
-        self.assertTrue(any("DATA MOD switched from USB to LAN" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("DATA MOD switched from USB to LAN" in t for t in self.statuses())))
         self.session.disconnect()
         self.assertEqual(self.radio.menu[b"\x01\x19"], 0x01)
         self.assertEqual(self.radio.menu[b"\x01\x18"], 0x00)

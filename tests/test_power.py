@@ -34,7 +34,7 @@ class TestPowerOffOn(_TxBase):
         self.assertEqual(self.radio.menu[b"\x00\x85"], USB)
         self.assertEqual(self.radio.menu[b"\x00\x84"], MIC)
         self.assertEqual(self.pending(), {})
-        self.assertTrue(any("Radio switched off" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("Radio switched off" in t for t in self.statuses())))
         # standby: stays connected (audio timeout suspended), controls refused
         time.sleep(6.5)
         self.assertTrue(self.session.connected)
