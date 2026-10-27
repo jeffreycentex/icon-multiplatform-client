@@ -136,13 +136,13 @@ class TestDataMod(_TxBase):
         self.assertEqual(self.radio.menu[b"\x00\x85"], LAN)
         self.assertEqual(self.radio.menu[b"\x00\x84"], LAN)
         self.assertEqual(self.pending(), {"IC-7300MK2@127.0.0.1": {"data_mod": USB, "data_off_mod": MIC}})
-        self.assertTrue(any("DATA MOD switched from USB to LAN" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("DATA MOD switched from USB to LAN" in t for t in self.statuses())))
         self.session.disconnect()
         self.assertEqual(self.radio.menu[b"\x00\x85"], USB)
         self.assertEqual(self.radio.menu[b"\x00\x84"], MIC)
         self.assertEqual(self.pending(), {})
-        self.assertTrue(any("DATA MOD restored to USB" in t for t in self.statuses()))
-        self.assertTrue(any("DATA OFF MOD restored to MIC" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("DATA MOD restored to USB" in t for t in self.statuses())))
+        self.assertTrue(wait_for(lambda: any("DATA OFF MOD restored to MIC" in t for t in self.statuses())))
 
     def test_crash_then_recover(self):
         self.assertTrue(wait_for(lambda: self.session.data_mod == LAN))
@@ -158,7 +158,7 @@ class TestDataMod(_TxBase):
         self.session = self._session()                    # next run of the app
         self.session.connect(self._spec())
         self.assertTrue(wait_for(lambda: self.session.data_mod == LAN))
-        self.assertTrue(any("previous session left DATA MOD changed" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("previous session left DATA MOD changed" in t for t in self.statuses())))
         self.session.disconnect()
         self.assertEqual(self.radio.menu[b"\x00\x85"], USB)                       # original, not LAN
         self.assertEqual(self.pending(), {})
@@ -285,7 +285,7 @@ class TestPtt(_TxBase):
         self.session.set_ptt(True)
         self.assertTrue(wait_for(lambda: self.radio.ptt))
         self.assertTrue(wait_for(lambda: not self.radio.ptt and not self.session.ptt, 3))
-        self.assertTrue(any("PTT timeout" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("PTT timeout" in t for t in self.statuses())))
 
     def test_leaving_data_mode_unkeys(self):
         self._ready_for_tx()
@@ -299,7 +299,7 @@ class TestPtt(_TxBase):
         self.assertTrue(wait_for(lambda: self.radio.ptt))
         self.radio.data = False                                     # DATA turned off on the radio
         self.assertTrue(wait_for(lambda: not self.radio.ptt, 4))
-        self.assertTrue(any("left DATA mode" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("left DATA mode" in t for t in self.statuses())))
 
     def test_disconnect_unkeys_and_restores(self):
         self._ready_for_tx()
@@ -360,7 +360,7 @@ class TestVoicePtt(_TxBase):
         self.assertTrue(wait_for(lambda: self.radio.ptt))
         self.radio.data = True                                    # DATA pressed on the radio
         self.assertTrue(wait_for(lambda: not self.radio.ptt, 4))
-        self.assertTrue(any("while transmitting voice" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("while transmitting voice" in t for t in self.statuses())))
 
     def test_voice_without_voice_input_refused(self):
         self.session.set_mode("USB", False)
@@ -450,7 +450,7 @@ class TestRigctldPtt(_TxBase):
         self.assertTrue(wait_for(lambda: self.radio.ptt))
         sock.close()                                       # WSJT-X crashes while transmitting
         self.assertTrue(wait_for(lambda: not self.radio.ptt, 4))
-        self.assertTrue(any("rigctl client that keyed PTT disconnected" in t for t in self.statuses()))
+        self.assertTrue(wait_for(lambda: any("rigctl client that keyed PTT disconnected" in t for t in self.statuses())))
 
     def test_refused_in_plain_mode(self):
         self.rig.plain_ssb_is_data = False
