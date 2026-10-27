@@ -550,7 +550,3 @@ def make_file_sink(path):
         return M4aSink(path if ext != ".aac" else os.path.splitext(path)[0] + ".m4a")
     raise ValueError("unsupported file type %r (use .wav, .m4a or .mp4)" % ext)
 
-
-def default_recording_name(freq_hz, mode, ext):
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    return "icom_%s_%.3fkHz_%s%s" % (stamp, freq_hz / 1000.0, mode, ext)

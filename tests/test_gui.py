@@ -156,6 +156,37 @@ class TestGui(unittest.TestCase):
         self.assertEqual(self.radio.menu[b"\x00\x85"], 0x01)      # DATA MOD put back to USB
 
 
+    def test_api_drives_window(self):
+        import socket
+        from icomremote.ctl import ApiClient
+        w = self.w
+        p = self.radio.ports
+        w.radio.connect(ConnectionSpec("127.0.0.1", "beer", "beerbeer", p["control"], p["serial"], p["audio"]))
+        self.assertTrue(self.pump_until(lambda: w.freq.isEnabled() and w.freq.value() == 14074.0))
+        with socket.socket() as sk:
+            sk.bind(("127.0.0.1", 0))
+            port = sk.getsockname()[1]
+        w.api_port.setValue(port)
+        w.api_enable.setChecked(True)
+        self.assertTrue(w.api_status.text().startswith("Listening"), w.api_status.text())
+        cl = ApiClient(port=port)
+        code, r = cl.tune(freq_khz=7110, mode="LSB")
+        self.assertEqual(code, 200, r)
+        self.assertTrue(self.pump_until(lambda: w.freq.value() == 7110.0 and w.mode_buttons["LSB"].isChecked()
+                                        and w.data_btn.isChecked()))
+        w.rec_dir.setText(self.tmp)
+        w.rec_dir.editingFinished.emit()
+        code, r = cl.record_start(name="api_test")
+        self.assertEqual(code, 200, r)
+        self.assertEqual(os.path.dirname(r["recording"]["path"]), self.tmp)
+        self.assertTrue(self.pump_until(lambda: w.rec_btn.isChecked() and w.rec_label.text().startswith("Recording")))
+        code, r = cl.record_stop()
+        self.assertTrue(r["was_recording"])
+        self.assertTrue(self.pump_until(lambda: not w.rec_btn.isChecked()
+                                        and w.rec_label.text().startswith("Saved api_test")))
+        w.api_enable.setChecked(False)
+        self.assertEqual(w.api_status.text(), "Off")
+
     def test_voice_space_bar(self):
         from test_tx import FakeSource
         w = self.w

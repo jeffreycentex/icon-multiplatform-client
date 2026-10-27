@@ -1,4 +1,5 @@
 """Entry point:  python -m icomremote [--debug] [--log-file FILE] [--check]
+             python -m icomremote ctl <command> ...   control a running instance via the API
 The step-1 connection test is still available:  python -m icomremote.probe
 
 The log always goes to icomremote.log in the app's settings folder as well
@@ -105,6 +106,9 @@ def check():
 
 
 def main():
+    if sys.argv[1:2] == ["ctl"]:               # API client: no log rotation, no Qt
+        from .ctl import main as ctl_main
+        return ctl_main(sys.argv[2:])
     ap = argparse.ArgumentParser(prog="icomremote", description="Icom RS-BA1 remote client")
     ap.add_argument("--debug", action="store_true", help="verbose logging, including packet hex dumps")
     ap.add_argument("--log-file", help="also write the log to this file")

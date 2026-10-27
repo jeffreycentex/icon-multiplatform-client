@@ -41,6 +41,7 @@ scope, CW/RTTY modes.
 | 5 | Power ON/OFF | verified on IC-7300MK2 (off, on, connect while off) |
 | 6 | PyInstaller builds + CI | CI green on macOS, Windows, Linux (tests incl. GUI, build, built-app self-check); owner to test the .app and a Windows build on hardware |
 | 0.9 | IC-9700 / IC-7610 profiles, per-model menu table (`civ.MODELS`), Linux audio docs, README uses `run_icomremote.py` | tagged `v0.9`; other models tested against the fake radio only |
+| API | Remote control API v1 (kiwisdr-remote compatible subset) for FLDigi Net Scheduler: status, tune, record/start, record/stop; `ctl` client | fake radio only; owner to test with the scheduler |
 
 ## Spec decisions (from the owner)
 
@@ -84,6 +85,24 @@ scope, CW/RTTY modes.
 - `samplerate` removed from requirements (Windows build pain; linear
   resampling is inaudible at 48 kHz). PyAV stays for M4A.
 
+## Remote control API (docs/API.md)
+
+- Port of kiwisdr-remote's API v1. **Owner's scope: frequency, mode and
+  recording only.** No `/connect` / `/disconnect` (404 with a hint), no
+  session policy (`session: null`), no PTT / power / MOD endpoints.
+  **Control only: it must not interfere with the app's transmit** (PTT
+  button, armed Space, rigctld `T`); owner's clarification. The only TX
+  interaction is API `/tune` being refused while on air.
+- `/tune` is **refused (409 `transmitting`) while keyed, keying, tuning or the
+  radio reports TX**; the check and the change run under `_ptt_lock`
+  (`test_tune_never_reaches_the_radio_while_keyed`). Plain USB/LSB follow the
+  rigctl "plain = data" checkbox (one setting for both). Passband ignored.
+- Default port 7373 = KiwiSDR Remote's, so the scheduler needs no change.
+- `service.IcomService` owns the `RadioSession`; the GUI records through it
+  and follows API recordings via the session's `recording` event.
+- Recording gap fill: silence for the time without audio, only after a
+  connection ended or standby (`_rec_gap_pending`), not for in-session jitter.
+
 ## Architecture
 
 ```
@@ -95,6 +114,9 @@ icomremote/
                 PTT/TX/DATA MOD/tuner logic; audio sinks.
   rigctld.py    hamlib NET rigctl (model 2) server, threaded TCP; from
                 kiwisdr-remote. Tracks which client keyed PTT.
+  service.py    IcomService: tune / record / status for the API; owns the session.
+  api.py        HTTP/JSON API server (stdlib), from kiwisdr-remote.
+  ctl.py        ApiClient + `ctl` command line.
   civ.py        CI-V framing/BCD, decoder -> (kind, value) events, meter
                 scales, filter widths, command builders, menu item tables.
   state.py      modes, hamlib mapping, per-model freq limits, profiles.
@@ -112,7 +134,8 @@ tests/          fake_rsba1.py (fake radio over real UDP) + unit, end-to-end,
 ```
 
 Threads: GUI thread; session thread (asyncio; the only one touching sockets);
-PortAudio callback threads (RX playback, TX capture); rigctld threads. Cross
+PortAudio callback threads (RX playback, TX capture); rigctld threads; API
+server threads and the service ticker (recording max_seconds). Cross
 into the loop only with `call_soon_threadsafe` / `run_coroutine_threadsafe`.
 
 ## RS-BA1 protocol notes
@@ -235,10 +258,6 @@ confirmed from a log. Hardening added (`tests/test_reliability.py`):
   unknown), re-read every 10 s; key-down waits for MOD setup to finish.
 - Log always written to the settings dir, last 5 runs kept (`.1` = previous),
   `health:` line each minute. Ask for `icomremote.log.1` after a bad session.
-
-Open: on the IC-7300MK2 the owner reports the passband shown in USB-D as
-~800-2100 Hz while the radio shows full width; where it is displayed not yet
-known.
 
 ## Environment and testing
 

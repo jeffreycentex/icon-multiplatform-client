@@ -62,6 +62,7 @@ MODS_SETUP_WAIT = 8.0               # key-down waits this long for DATA MOD setu
 TX_INPUT_WATCHDOG = 1.0             # keyed and no audio from the input for this long: reopen it
 SINK_STALL_SECONDS = 2.0            # audio arriving but the sound card has stopped asking for it
 HEALTH_LOG_INTERVAL = 60.0
+MAX_GAP_FILL = 1800.0               # seconds of silence inserted into a recording for one gap
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,14 @@ class RadioSession:
         self._sink_lock = threading.Lock()
         self._sinks = {}
         self._connected_at = None
+        self.last_error = None           # what ended the last connection attempt
+        self.failed = False              # gave up (bad login); None of the retries will help
+        self.was_connected = False       # connected at least once since connect()
+        # Recording: received audio's wall-clock end and whether a connection
+        # ended since, so the gap can be filled with silence when audio returns.
+        self._rec_last_audio = None
+        self._rec_gap_pending = False
+        self.gap_seconds = 0.0
         self._civ_waiters = []
         # Stale-reply fences: reads sent / replies received per group, and per
         # group (target reply count, deadline) after a change made by the app.
@@ -185,7 +194,14 @@ class RadioSession:
     def running(self):
         return self._thread is not None and self._thread.is_alive()
 
+    @property
+    def spec(self):
+        return self._spec
+
     def _set_connected(self, flag):
+        if flag:
+            self.was_connected = True
+            self.last_error = None
         if flag != self._connected:
             self._connected = flag
             self._connected_at = time.monotonic() if flag else None
@@ -195,6 +211,7 @@ class RadioSession:
     def connect(self, spec: ConnectionSpec):
         self.disconnect()
         self._spec = spec
+        self.last_error, self.failed, self.was_connected = None, False, False
         ready = threading.Event()
         self._thread = threading.Thread(target=self._thread_main, args=(ready,),
                                         name="rsba1-session", daemon=True)
@@ -234,7 +251,10 @@ class RadioSession:
                 err = await self._run_once()
                 if self._stop.is_set():
                     break
+                if err is not None:
+                    self.last_error = str(err) or type(err).__name__
                 if isinstance(err, AuthError):
+                    self.failed = True
                     self._status("Login failed: %s" % err, "error")
                     break
                 if err is None:
@@ -342,6 +362,7 @@ class RadioSession:
                 self._unkey()
             self._close_tx_sources()
             self.power = None
+            self._rec_gap_pending = True
             self._powering_on = False
             self._set_connected(False)
             # Same order as kappanhang: deauth + close control, then serial, then audio.
@@ -938,6 +959,7 @@ class RadioSession:
         if self._audio is not None:
             self._audio.require_audio = state == "on"
         if state == "standby":
+            self._rec_gap_pending = True
             self._unkey(reason="Unkeyed: the radio went to standby" if self._keyed else None)
             if self._tuning:
                 self._end_tune("Tune stopped: the radio went to standby", "error")
@@ -1278,12 +1300,35 @@ class RadioSession:
     def _on_audio(self, pcm):
         samples = np.frombuffer(pcm, dtype="<i2")
         with self._sink_lock:
+            if "file" in self._sinks:
+                self._fill_recording_gap()
+                self._rec_last_audio = time.monotonic()
             for name, sink in list(self._sinks.items()):
                 try:
                     sink.write(samples)
                 except Exception as e:
                     log.exception("sink %s failed", name)
                     self._drop_sink(name, "Audio output '%s' stopped: %s" % (name, e))
+
+    def _fill_recording_gap(self):
+        """First audio after a reconnect or standby: insert silence for the
+        time without audio, so a position in the file still matches the clock.
+        (Within a connection, late packets arrive late; nothing is inserted.)"""
+        last, pending = self._rec_last_audio, self._rec_gap_pending
+        self._rec_gap_pending = False
+        if not pending or last is None:
+            return
+        gap = min(time.monotonic() - last, MAX_GAP_FILL)
+        if gap < 0.5:
+            return
+        sink = self._sinks["file"]
+        silence = np.zeros(SAMPLE_RATE, dtype="<i2")
+        left = int(gap * SAMPLE_RATE)
+        while left > 0:
+            sink.write(silence[:min(left, SAMPLE_RATE)])
+            left -= SAMPLE_RATE
+        self.gap_seconds += gap
+        log.info("recording: inserted %.1f s of silence for the gap without audio", gap)
 
     def _sink_set_rate(self, name, sink):
         try:
@@ -1320,7 +1365,10 @@ class RadioSession:
 
     def start_recording(self, path):
         """Record received audio (.wav, .m4a or .mp4). Waits for audio if not connected."""
-        ok = self._install_sink("file", make_file_sink(path))
+        sink = make_file_sink(path)
+        with self._sink_lock:
+            self._rec_last_audio, self._rec_gap_pending, self.gap_seconds = None, False, 0.0
+        ok = self._install_sink("file", sink)
         if ok:
             self._emit("recording", {"active": True, "path": path})
         return ok
@@ -1331,9 +1379,14 @@ class RadioSession:
         if sink is None:
             return None
         sink.close()
-        info = {"active": False, "path": sink.current_path or sink.path, "seconds": sink.seconds()}
+        info = {"active": False, "path": sink.current_path or sink.path, "seconds": sink.seconds(),
+                "gap_seconds": self.gap_seconds}
         self._emit("recording", info)
         return info
+
+    def recording_path(self):
+        sink = self._sinks.get("file")
+        return (sink.current_path or sink.path) if sink else None
 
     def recording_seconds(self):
         sink = self._sinks.get("file")

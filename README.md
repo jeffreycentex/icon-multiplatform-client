@@ -23,7 +23,8 @@ IC-7300MK2 ◄udp─┤ session thread (asyncio): control / serial / audio  │
 | 4 | Output/SWR readout, RF power, TUNE | done, verified on an IC-7300MK2 |
 | 5 | Power ON/OFF | done, verified on an IC-7300MK2 |
 | 6 | Standalone builds (PyInstaller), CI on macOS / Windows / Linux | done |
-| 0.9 | IC-9700 and IC-7610 profiles, per-model DATA MOD tables | **this release** |
+| 0.9 | IC-9700 and IC-7610 profiles, per-model DATA MOD tables | released |
+| API | Remote control API for schedulers (status, tune, record) | **new**, tested against the fake radio |
 
 ## Supported radios
 
@@ -391,6 +392,24 @@ reads return the last known values and changes fail with `RPRT -6`.
 (the reason appears in the status bar). PTT keyed by a client is released if
 that client disconnects.
 
+## Remote control API
+
+A local HTTP/JSON API for schedulers and scripts such as
+[FLDigi Net Scheduler](https://github.com/jeffreycentex/fldigi-net-scheduler):
+status, frequency/mode and recording, compatible with KiwiSDR Remote's API
+(without `/connect`; connect in the window). It is control only: it has no
+PTT of its own and doesn't affect transmitting from the window or rigctld;
+an API tune is refused while the radio is on the air. Off by default: tick **Enable** in the
+*Remote control API* box (127.0.0.1, port 7373).
+
+```
+python run_icomremote.py ctl status
+python run_icomremote.py ctl tune --khz 7074 --mode USB-D
+python run_icomremote.py ctl record-start --name "{date}_net" --max-seconds 3600
+```
+
+Details: [docs/API.md](docs/API.md).
+
 ## Connection test (command line)
 
 `python -m icomremote.probe` connects without the GUI and prints what it
@@ -428,6 +447,8 @@ IC-7300MK2. Covered:
 - login, bad password, radio in use by another client, clean disconnect
 - CI-V reads, transceive broadcasts, frequency/mode/DATA/filter control
 - rigctld: frequency, mode mapping, passband reporting, PTT and its release on client disconnect, dump_state
+- remote control API: status, tune (refused while keyed, including a race test), recording names,
+  max_seconds, gap filling, browser/Host/token protections, the ctl client, the window following API changes
 - transmit: framing/resampling, one input for data and voice, the PTT rules and every unkey trigger,
   audio sent only while keyed, rapid press/release never leaving the radio keyed
 - the armed space bar (GUI test): disarmed, armed in a text field, disarm while keyed
@@ -527,6 +548,9 @@ icomremote/
   gui.py            PySide6 main window
   session.py        connection lifecycle, control API (frequency/mode/filter), audio sinks
   rigctld.py        hamlib NET rigctl server
+  service.py        tune / record / status for the API (the window records through it too)
+  api.py            remote control HTTP/JSON API (docs/API.md)
+  ctl.py            API client and 'ctl' command line
   state.py          modes, rigctl mode mapping, radio profiles and limits
   civ.py            CI-V framing, BCD, meter scales, filter widths, state decoder
   sinks.py          sound card (clock-drift locked) and WAV outputs
@@ -537,4 +561,5 @@ icomremote/
   probe.py          command-line connection test
   rsba1/            RS-BA1 protocol: packets, passcode, reorder buffer, UDP streams
 tests/              fake radio + unit, end-to-end and GUI tests
+docs/API.md         remote control API reference
 ```

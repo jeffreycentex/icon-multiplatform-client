@@ -14,11 +14,12 @@ from PySide6.QtWidgets import (
     QSlider, QSpinBox, QStatusBar, QVBoxLayout, QWidget)
 
 from . import __version__, civ
+from .api import DEFAULT_PORT as API_DEFAULT_PORT, ApiServer
 from .rigctld import RigctldServer
-from .session import ConnectionSpec, NotConnected, PttRefused, RadioSession
+from .service import ApiError, IcomService, default_record_dir
+from .session import ConnectionSpec, NotConnected, PttRefused
 from .sinks import (HAVE_PYAV, HAVE_SOUNDDEVICE, PULSE_PREFIX, create_null_sink,
-                    default_recording_name, guess_virtual_cable, list_output_devices,
-                    sounddevice_error)
+                    guess_virtual_cable, list_output_devices, sounddevice_error)
 from .state import BASE_MODES, FILTERS, PROFILES
 from .txaudio import guess_tx_cable, list_input_devices
 
@@ -42,8 +43,10 @@ class MainWindow(QMainWindow):
         self.settings = settings if settings is not None else QSettings("IcomRemote", "Icom Remote")
         self.bridge = _Bridge()
         self.bridge.event.connect(self._on_event, Qt.QueuedConnection)
-        self.radio = RadioSession(on_event=self.bridge.event.emit)
+        self.service = IcomService(on_event=self.bridge.event.emit)
+        self.radio = self.service.radio
         self.rigctld = None
+        self.api = None
         self._editing_freq = False
         self._rec_started = None
         self._space_owner = object()     # identifies space-bar keying to the session
@@ -63,6 +66,7 @@ class MainWindow(QMainWindow):
         right = QVBoxLayout()                # transmit side and CAT
         right.addWidget(self._build_tx_box())
         right.addWidget(self._build_rigctl_box())
+        right.addWidget(self._build_api_box())
         right.addStretch(1)
         cols.addLayout(left, 1)
         cols.addLayout(right, 1)
@@ -87,6 +91,8 @@ class MainWindow(QMainWindow):
             self.audio_enable.setToolTip("PortAudio not available: %s" % sounddevice_error())
         if self.rig_enable.isChecked():
             self._toggle_rigctld(True)
+        if self.api_enable.isChecked():
+            self._toggle_api(True)
         QApplication.instance().installEventFilter(self)
 
     # ================================================================== layout
@@ -388,13 +394,14 @@ class MainWindow(QMainWindow):
         self.rig_addr.addItems(["127.0.0.1", "0.0.0.0", "::1"])
         self.rig_addr.setToolTip("127.0.0.1 = this computer only; 0.0.0.0 = allow LAN clients")
         self.rig_port = QSpinBox(minimum=1, maximum=65535, value=4532)
-        self.rig_plain_data = QCheckBox("Plain USB/LSB from rigctl selects USB-D/LSB-D")
+        self.rig_plain_data = QCheckBox("Plain USB/LSB from rigctl or the API selects USB-D/LSB-D")
         self.rig_plain_data.setToolTip("PKTUSB/PKTLSB always select DATA mode. With this on,\n"
-                                       "plain USB/LSB do too (fldigi 'USB', WSJT-X mode 'USB').")
+                                       "plain USB/LSB do too (fldigi 'USB', WSJT-X mode 'USB',\n"
+                                       "a scheduler's /tune with mode 'USB').")
         self.rig_plain_data.toggled.connect(self._rig_plain_data_toggled)
         self.rig_status = QLabel("Off")
         hint = QLabel("In the client choose rig 'Hamlib NET rigctl' (model 2), "
-                      "address 127.0.0.1:<port>. PTT arrives in the next step.")
+                      "address 127.0.0.1:<port>.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: gray")
         g.addWidget(self.rig_enable, 0, 0)
@@ -405,6 +412,25 @@ class MainWindow(QMainWindow):
         g.addWidget(self.rig_plain_data, 1, 0, 1, 5)
         g.addWidget(self.rig_status, 2, 0, 1, 5)
         g.addWidget(hint, 3, 0, 1, 5)
+        return box
+
+    def _build_api_box(self):
+        box = QGroupBox("Remote control API (schedulers, scripts)")
+        g = QGridLayout(box)
+        self.api_enable = QCheckBox("Enable on 127.0.0.1")
+        self.api_enable.setToolTip("HTTP/JSON API: status, tune and recording (docs/API.md).\n"
+                                   "Control only: transmitting from this window and rigctld is unaffected;\n"
+                                   "an API tune is refused while the radio is on the air.")
+        self.api_enable.toggled.connect(self._toggle_api)
+        self.api_port = QSpinBox(minimum=1, maximum=65535, value=API_DEFAULT_PORT)
+        self.api_token = QLineEdit(echoMode=QLineEdit.Password, placeholderText="token (optional)")
+        self.api_status = QLabel("Off")
+        g.addWidget(self.api_enable, 0, 0)
+        g.addWidget(QLabel("Port"), 0, 1)
+        g.addWidget(self.api_port, 0, 2)
+        g.addWidget(self.api_token, 0, 3)
+        g.addWidget(self.api_status, 1, 0, 1, 4)
+        g.setColumnStretch(3, 1)
         return box
 
     # ================================================================== settings
@@ -425,7 +451,9 @@ class MainWindow(QMainWindow):
         self.volume.setValue(s.value("volume", 100, type=int))
         i = self.rec_format.findData(s.value("rec_format", ".wav"))
         self.rec_format.setCurrentIndex(i if i >= 0 and self.rec_format.model().item(i).isEnabled() else 0)
-        self.rec_dir.setText(s.value("rec_dir", os.path.join(os.path.expanduser("~"), "Music", "IcomRemote")))
+        self.rec_dir.setText(s.value("rec_dir", default_record_dir()))
+        self.service.record_dir = self.rec_dir.text()
+        self.rec_dir.editingFinished.connect(self._rec_dir_changed)
         self._refresh_tx_devices(select=s.value("tx_device", ""))
         self.tx_gain.setValue(s.value("tx_gain", 100, type=int))
         self.ptt_timeout.setValue(s.value("ptt_timeout", 180, type=int))
@@ -440,6 +468,12 @@ class MainWindow(QMainWindow):
         self.rig_addr.setCurrentText(s.value("rig_addr", "127.0.0.1"))
         self.rig_port.setValue(s.value("rig_port", 4532, type=int))
         self.rig_plain_data.setChecked(s.value("rig_plain_data", True, type=bool))
+        self.service.plain_ssb_is_data = self.rig_plain_data.isChecked()
+        self.api_port.setValue(s.value("api_port", API_DEFAULT_PORT, type=int))
+        self.api_token.setText(s.value("api_token", ""))
+        self.api_enable.blockSignals(True)
+        self.api_enable.setChecked(s.value("api_enable", False, type=bool))
+        self.api_enable.blockSignals(False)
         self.rig_enable.blockSignals(True)
         self.rig_enable.setChecked(s.value("rig_enable", True, type=bool))
         self.rig_enable.blockSignals(False)
@@ -475,6 +509,9 @@ class MainWindow(QMainWindow):
         s.setValue("rig_addr", self.rig_addr.currentText())
         s.setValue("rig_port", self.rig_port.value())
         s.setValue("rig_plain_data", self.rig_plain_data.isChecked())
+        s.setValue("api_enable", self.api_enable.isChecked())
+        s.setValue("api_port", self.api_port.value())
+        s.setValue("api_token", self.api_token.text())
         s.setValue("geometry2", self.saveGeometry())
 
     # ================================================================== connection
@@ -646,32 +683,42 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Recording folder", self.rec_dir.text())
         if d:
             self.rec_dir.setText(d)
+            self._rec_dir_changed()
+
+    def _rec_dir_changed(self):
+        self.service.record_dir = self.rec_dir.text().strip() or default_record_dir()
 
     @Slot(bool)
     def _record_toggled(self, on):
         if not on:
-            info = self.radio.stop_recording()
-            self.rec_btn.setText("● Record")
-            self._rec_started = None
-            if info:
-                self.rec_label.setText("Saved %s (%.0f s)" % (os.path.basename(info["path"]), info["seconds"]))
+            self._show_recording(self.service.stop_recording(reason="ui") or {"active": False})
             return
-        folder = self.rec_dir.text().strip() or os.path.expanduser("~")
+        self._rec_dir_changed()
         try:
-            os.makedirs(folder, exist_ok=True)
-            st = self.radio.rig
-            mode = st.mode_label if st.mode else "rx"
-            path = os.path.join(folder, default_recording_name(st.freq_hz, mode, self.rec_format.currentData()))
-            self.radio.start_recording(path)
-        except Exception as e:
+            info = self.service.start_recording(ext=self.rec_format.currentData(),
+                                                formats=(".wav", ".m4a", ".mp4"))
+        except ApiError as e:
             QMessageBox.warning(self, "Record", str(e))
-            self.rec_btn.blockSignals(True)
-            self.rec_btn.setChecked(False)
-            self.rec_btn.blockSignals(False)
+            self._show_recording({"active": False}, label=False)
             return
-        self._rec_started = time.monotonic()
-        self.rec_btn.setText("■ Stop")
-        self.rec_label.setText(os.path.basename(path))
+        self._show_recording(info)
+
+    def _show_recording(self, info, label=True):
+        """Button and label for a recording started or stopped here or through the API."""
+        active = bool(info.get("active"))
+        self.rec_btn.blockSignals(True)
+        self.rec_btn.setChecked(active)
+        self.rec_btn.blockSignals(False)
+        self.rec_btn.setText("■ Stop" if active else "● Record")
+        if active:
+            if self._rec_started is None:
+                self._rec_started = time.monotonic()
+            if label:
+                self.rec_label.setText(os.path.basename(info["path"]))
+            return
+        self._rec_started = None
+        if label and info.get("path"):
+            self.rec_label.setText("Saved %s (%.0f s)" % (os.path.basename(info["path"]), info["seconds"]))
 
     # ================================================================== transmit
     def _refresh_tx_devices(self, select=None):
@@ -896,8 +943,35 @@ class MainWindow(QMainWindow):
         self._rig_activity("clients", (0, None, False))
 
     def _rig_plain_data_toggled(self, on):
+        self.service.plain_ssb_is_data = on
         if self.rigctld is not None:
             self.rigctld.plain_ssb_is_data = on
+
+    # ================================================================== remote control API
+    @Slot(bool)
+    def _toggle_api(self, on):
+        if self.api is not None:
+            self.api.stop()
+            self.api = None
+        self.api_port.setEnabled(not on)
+        self.api_token.setEnabled(not on)
+        if not on:
+            self.api_status.setText("Off")
+            return
+        try:
+            self.api = ApiServer(self.service, "127.0.0.1", self.api_port.value(),
+                                 self.api_token.text().strip() or None)
+            self.api.start()
+        except (OSError, ValueError) as e:
+            self.api = None
+            self.api_status.setText("Could not start: %s" % e)
+            self.api_enable.blockSignals(True)
+            self.api_enable.setChecked(False)
+            self.api_enable.blockSignals(False)
+            self.api_port.setEnabled(True)
+            self.api_token.setEnabled(True)
+            return
+        self.api_status.setText("Listening on %s%s" % (self.api.url, "  (token required)" if self.api.token else ""))
 
     def _rig_activity(self, kind, payload):
         # called from rigctld threads -> hop to GUI thread
@@ -977,6 +1051,12 @@ class MainWindow(QMainWindow):
             if not self.radio.running:
                 self.connect_btn.setText("Connect")
                 self._set_controls_enabled(False)
+        elif kind == "recording":
+            # Started or stopped through the API (or by max_seconds). Events are
+            # queued: skip one that no longer matches the recording state.
+            active = self.radio.recording_path() is not None
+            if bool(payload.get("active")) == active and self.rec_btn.isChecked() != active:
+                self._show_recording(payload)
         elif kind == "sink_failed":
             if payload == "card":
                 self.audio_enable.blockSignals(True)
@@ -1029,7 +1109,9 @@ class MainWindow(QMainWindow):
         self._save_settings()
         if self.rigctld is not None:
             self.rigctld.stop()
-        self.radio.shutdown()
+        if self.api is not None:
+            self.api.stop()
+        self.service.shutdown()
         super().closeEvent(ev)
 
 

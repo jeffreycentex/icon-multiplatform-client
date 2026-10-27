@@ -125,6 +125,7 @@ class FakeRadio:
         self.menu_writes = []
         self.ptt = False
         self.ptt_log = []                    # (time, on)
+        self.freq_log = []                   # (time, hz) of every frequency set
         self.rf_power = 128                  # 0..255
         self.rf_power_writes = []
         self.tuner = 0x01
@@ -406,6 +407,7 @@ class FakeRadio:
             return echo + [mk(0x15, 0x02, civ.encode_level(120))]
         if cmd == 0x05:
             self.freq_hz = civ.decode_freq(payload)
+            self.freq_log.append((time.monotonic(), self.freq_hz))
             return echo + [mk(civ.OK)]
         return echo + [mk(civ.NG)]
 
