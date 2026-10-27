@@ -126,6 +126,10 @@ class FakeRadio:
         self.ptt = False
         self.ptt_log = []                    # (time, on)
         self.freq_log = []                   # (time, hz) of every frequency set
+        # PTT changes and frequency sets in the order the radio handled them
+        # ("ptt", on) / ("freq", hz). Use this, not the times, to order them:
+        # time.monotonic() ticks every 15.6 ms on Windows.
+        self.civ_order = []
         self.rf_power = 128                  # 0..255
         self.rf_power_writes = []
         self.tuner = 0x01
@@ -390,6 +394,7 @@ class FakeRadio:
                 return echo + [mk(0x1C, 0x00, b"\x01" if self.ptt else b"\x00")]
             self.ptt = payload[1] == 1
             self.ptt_log.append((time.monotonic(), self.ptt))
+            self.civ_order.append(("ptt", self.ptt))
             return echo + [mk(civ.OK)]
         if cmd == 0x1A and payload[:1] == b"\x05" and len(payload) >= 3:
             item = bytes(payload[1:3])
@@ -408,6 +413,7 @@ class FakeRadio:
         if cmd == 0x05:
             self.freq_hz = civ.decode_freq(payload)
             self.freq_log.append((time.monotonic(), self.freq_hz))
+            self.civ_order.append(("freq", self.freq_hz))
             return echo + [mk(civ.OK)]
         return echo + [mk(civ.NG)]
 

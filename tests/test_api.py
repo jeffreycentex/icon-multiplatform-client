@@ -146,18 +146,15 @@ class TestTune(ServiceCase):
             th.join()
         self.assertTrue(wait_for(lambda: not self.radio.ptt))
         time.sleep(0.3)
-        keyed_at = [t for t, on in self.radio.ptt_log if on]
-        self.assertTrue(keyed_at, "PTT never keyed: race not exercised")
-        self.assertGreater(len(self.radio.freq_log), 0, "no tune got through: race not exercised")
-
-        def keyed(t):
-            state = False
-            for when, on in self.radio.ptt_log:
-                if when > t:
-                    break
-                state = on
-            return state
-        bad = [(t, hz) for t, hz in self.radio.freq_log if keyed(t)]
+        order = list(self.radio.civ_order)
+        self.assertIn(("ptt", True), order, "PTT never keyed: race not exercised")
+        self.assertTrue(any(k == "freq" for k, _ in order), "no tune got through: race not exercised")
+        keyed, bad = False, []
+        for kind, v in order:                # the radio's own order (timestamps are too coarse on Windows)
+            if kind == "ptt":
+                keyed = v
+            elif keyed:
+                bad.append(v)
         self.assertEqual(bad, [])
 
 
